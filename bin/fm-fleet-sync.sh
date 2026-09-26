@@ -11,7 +11,7 @@
 # is left untouched and reported as a quantified, loud "STUCK: ... N commits behind
 # ... - needs attention" warning rather than a quiet drift. Nothing is ever forced,
 # stashed, or discarded.
-# Still skips (benignly) local-only/no-origin projects, missing remotes/branches,
+# Still skips (benignly) local-only/live-sync/no-origin projects, missing remotes/branches,
 # and fetch failures. A project whose registry entry bin/fm-project-mode.sh
 # refuses is skipped too, naming that command so its refusal is readable, rather
 # than synced under a guessed posture.
@@ -333,6 +333,10 @@ sync_project() {
   mode=${mode_line%% *}
   if [ "$mode" = "local-only" ]; then
     echo "$label: skipped: local-only project"
+    return 0
+  fi
+  if [ "$mode" = "live-sync" ]; then
+    echo "$label: skipped: live-sync project"
     return 0
   fi
   if ! git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then

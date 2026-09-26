@@ -362,6 +362,8 @@ unset _teardown_source
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-live-sync-lib.sh
+. "$SCRIPT_DIR/fm-live-sync-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -1600,6 +1602,8 @@ backlog_done_args() {
     *)
       if [ "$MODE" = local-only ]; then
         BACKLOG_DONE_ARGS=(--note "local main")
+      elif [ "$MODE" = live-sync ]; then
+        BACKLOG_DONE_ARGS=(--note "live sync")
       elif [ -n "$PR_URL" ]; then
         BACKLOG_DONE_ARGS=(--pr "$PR_URL")
       fi
@@ -3499,7 +3503,7 @@ if [ -n "$X_REQUEST" ]; then
   echo "warning: task $ID still carries an unreconciled Relay request link ($X_REQUEST) on its task record." >&2
 fi
 
-if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
+if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != live-sync ] && [ "$FORCE" != "--force" ]; then
   if ! inspectable_git_worktree "$WT"; then
     echo "REFUSED: Orca ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
     echo "Cannot verify dirty or unlanded work; restore the worktree path or get explicit OK to discard, then --force." >&2
@@ -3509,7 +3513,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+if [ "$MODE" != live-sync ] && teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
     :
   else
@@ -3624,7 +3628,9 @@ fi
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
-if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
+if [ "$KIND" != secondmate ] && [ "$MODE" = live-sync ]; then
+  reap_task_worktree_processes tasktmp "$TASK_TMP"
+elif [ "$KIND" != secondmate ] && teardown_owns_worktree; then
   conclude_task_no_mistakes_run "$WT"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 elif [ "$KIND" != secondmate ]; then
@@ -3658,6 +3664,8 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   fi
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
+  :
+elif [ "$KIND" != secondmate ] && [ "$MODE" = live-sync ]; then
   :
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
@@ -3873,9 +3881,17 @@ else
     exit 1
   fi
 fi
+if [ "$KIND" != secondmate ] && [ "$MODE" = live-sync ]; then
+  if ! fm_live_sync_release_task "$STATE" "$ID"; then
+    fm_lock_release "$META_LOCK"
+    META_LOCK_HELD=0
+    echo "error: $ID's task record was removed, but its live-sync scope lock could not be released; run bin/fm-live-sync.sh release $ID after inspecting state/live-sync-locks/$ID.lock" >&2
+    exit 1
+  fi
+fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
-if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
+if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ] && [ "$MODE" != live-sync ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
 # A secondmate retirement may remove the home containing an overridden control

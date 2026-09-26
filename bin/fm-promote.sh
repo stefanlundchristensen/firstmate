@@ -36,6 +36,10 @@
 # binding and bin/fm-dod-lib.sh owns what it changes for the worker, including
 # the refusal of a forge on local-only.
 # Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>]
+# live-sync is intentionally not a scout-promotion target: a live-sync ship must
+# launch in the registered external directory with declared --live-scope values
+# and a scope lock acquired before editing, while a scout promotion continues in
+# the scout's scratch worktree.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -104,6 +108,9 @@ done
 }
 case "$MODE" in
   no-mistakes|direct-PR|local-only) ;;
+  live-sync)
+    echo "error: live-sync cannot be reached by scout promotion; start a live-sync ship so it launches in the registered external directory with explicit --live-scope values and a scope lock" >&2
+    exit 1 ;;
   no-mistakes-prod-only)
     echo "error: no-mistakes-prod-only is a registry policy, not a task mode; classify this task's surface and resolve it to no-mistakes or direct-PR" >&2
     exit 1 ;;

@@ -353,6 +353,7 @@ So each of these projects is refused rather than provisioned:
 
 - An unregistered project.
 - A `local-only` project.
+- A `live-sync` project.
 - A project whose registry entry does not resolve to a delivery posture at all.
 
 ### What the seed does

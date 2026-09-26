@@ -17,7 +17,7 @@
 # this home already has projects/<project>, whose origin is then read instead.
 # bin/fm-project-origin-lib.sh owns which URLs are accepted, and this home's
 # data/projects.md still owns the project's registered delivery mode, so an
-# unregistered or local-only project, or one whose registry entry
+# unregistered, local-only, or live-sync project, or one whose registry entry
 # bin/fm-project-mode.sh refuses, is refused rather than provisioned.
 # Seeding writes nothing under projects/ and needs no fleet sync first.
 #
@@ -179,7 +179,7 @@ $MODE_LINE
 EOF
   case "$MODE" in
     no-mistakes|direct-PR) ;;
-    local-only) die "project $project is local-only and cannot be provisioned remotely" ;;
+    local-only|live-sync) die "project $project is $MODE and cannot be provisioned remotely" ;;
     *) die "project $project has unsupported delivery mode: $MODE" ;;
   esac
   # An origin named on the command line is authoritative. Reading one from a
