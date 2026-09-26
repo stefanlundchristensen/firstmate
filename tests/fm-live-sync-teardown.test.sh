@@ -128,6 +128,25 @@ start_owned_group_writer_outside_vault() {  # <vault>
   printf '%s\n' "$!"
 }
 
+start_endpoint_with_detached_writer() {  # <vault> <pid-file>
+  python3 -c 'import os, sys, time; os.setsid(); child=os.fork();
+if child == 0:
+    os.setsid(); os.chdir("/tmp"); open(os.path.join(sys.argv[1], "Note.md"), "a").write("detached\\n"); time.sleep(300)
+else:
+    open(sys.argv[2], "w").write(str(child)); time.sleep(300)' "$1" "$2" </dev/null >/dev/null 2>&1 &
+  printf '%s\n' "$!"
+}
+
+wait_for_file() {  # <file>
+  local file=$1 i=0
+  while [ "$i" -lt 50 ]; do
+    [ -s "$file" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 wait_for_pid() {  # <pid>
   local pid=$1 i=0
   while [ "$i" -lt 50 ]; do
@@ -233,6 +252,39 @@ EOF
   pass "live-sync teardown stops owned endpoint writers outside the vault cwd before releasing locks"
 }
 
+test_detached_endpoint_descendant_writer_is_stopped_before_lock_release() {
+  local case_dir vault pidfile endpoint_pid writer_pid rc=0
+  case_dir=$(make_live_case detached-descendant 0)
+  vault="$case_dir/vault"
+  pidfile="$case_dir/detached-writer.pid"
+  endpoint_pid=$(start_endpoint_with_detached_writer "$vault" "$pidfile")
+  wait_for_pid "$endpoint_pid" || { kill "$endpoint_pid" 2>/dev/null || true; fail "endpoint process never started"; }
+  wait_for_file "$pidfile" || { kill "$endpoint_pid" 2>/dev/null || true; fail "detached writer pid was not recorded"; }
+  writer_pid=$(<"$pidfile")
+  wait_for_pid "$writer_pid" || { kill "$endpoint_pid" "$writer_pid" 2>/dev/null || true; fail "detached writer never started"; }
+  rm -f "$case_dir/fakebin/tmux"
+  cat > "$case_dir/fakebin/tmux" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}" in
+  display-message) printf '%s\n' '$endpoint_pid' ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$case_dir/fakebin/tmux"
+  run_live_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -eq 0 ] || { kill "$endpoint_pid" "$writer_pid" 2>/dev/null || true; wait "$endpoint_pid" 2>/dev/null || true; wait "$writer_pid" 2>/dev/null || true; fail "detached descendant writer teardown failed"; }
+  if kill -0 "$writer_pid" 2>/dev/null; then
+    kill "$endpoint_pid" "$writer_pid" 2>/dev/null || true
+    wait "$endpoint_pid" 2>/dev/null || true
+    wait "$writer_pid" 2>/dev/null || true
+    fail "detached descendant writer survived teardown"
+  fi
+  assert_absent "$case_dir/state/task-x1.meta" "detached descendant writer left task metadata after cleanup"
+  assert_absent "$case_dir/state/live-sync-locks/task-x1.lock" "detached descendant writer left live-sync lock after cleanup"
+  assert_grep "captured live-sync descendant" "$case_dir/stderr" "detached descendant cleanup did not report captured descendant reaping"
+  pass "live-sync teardown stops detached endpoint descendants before releasing locks"
+}
+
 test_herdr_endpoint_writer_outside_vault_is_stopped_before_lock_release() {
   local case_dir vault pid rc=0
   case_dir=$(make_live_case herdr-owned 0)
@@ -276,5 +328,6 @@ test_missing_endpoint_ownership_retains_lock_without_killing_writer() {
 test_uncertain_live_root_process_retains_lock
 test_owned_live_root_process_is_stopped_before_lock_release
 test_owned_endpoint_writer_outside_vault_is_stopped_before_lock_release
+test_detached_endpoint_descendant_writer_is_stopped_before_lock_release
 test_herdr_endpoint_writer_outside_vault_is_stopped_before_lock_release
 test_missing_endpoint_ownership_retains_lock_without_killing_writer

@@ -2185,6 +2185,13 @@ task_process_identity_matches() {  # <pid> <identity>
   [ "$current" = "$2" ]
 }
 
+task_pid_is_zombie() {  # <pid>
+  local stat
+  stat=$(ps -o stat= -p "$1" 2>/dev/null) || return 1
+  stat=$(printf '%s' "$stat" | tr -d '[:space:]')
+  case "$stat" in Z*) return 0 ;; *) return 1 ;; esac
+}
+
 task_pid_list_contains() {  # <pid-list> <pid>
   printf '%s\n' "$1" | grep -Fxq "$2"
 }
@@ -2219,15 +2226,59 @@ task_pids_in_pgid() {  # <pgid>
   ps -axo pid=,pgid= 2>/dev/null | awk -v want="$pgid" -v self="$$" '$2 == want && $1 != self { print $1 }' | sort -un
 }
 
+task_descendant_pids() {  # <root-pid>
+  local root=$1 rows
+  case "$root" in ''|*[!0-9]*|0|1) return 1 ;; esac
+  rows=$(ps -axo pid=,ppid= 2>/dev/null) || return 1
+  printf '%s\n' "$rows" | awk -v root="$root" -v self="$$" '
+    { pid[NR] = $1; ppid[NR] = $2 }
+    END {
+      want[root] = 1
+      changed = 1
+      while (changed) {
+        changed = 0
+        for (i = 1; i <= NR; i++) {
+          if ((ppid[i] in want) && !(pid[i] in want)) { want[pid[i]] = 1; changed = 1 }
+        }
+      }
+      for (i = 1; i <= NR; i++) {
+        if ((pid[i] in want) && pid[i] != root && pid[i] != self) print pid[i]
+      }
+    }' | sort -un
+}
+
+live_sync_capture_endpoint_owned_processes() {  # <root-pid>
+  local root=$1 pids pid identity
+  LIVE_SYNC_OWNERSHIP_CAPTURE_OK=0
+  LIVE_SYNC_CAPTURED_PIDS=()
+  LIVE_SYNC_CAPTURED_IDENTITIES=()
+  pids=$(task_descendant_pids "$root") || return 1
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    if ! identity=$(task_process_identity "$pid"); then
+      return 1
+    fi
+    LIVE_SYNC_CAPTURED_PIDS+=("$pid")
+    LIVE_SYNC_CAPTURED_IDENTITIES+=("$identity")
+  done <<EOF
+$pids
+EOF
+  LIVE_SYNC_OWNERSHIP_CAPTURE_OK=1
+}
+
 live_sync_capture_endpoint_process_group() {
-  local leader pgid own_pgid session pane info
+  local leader pgid own_pgid session pane info root_pid
   LIVE_SYNC_ENDPOINT_PGID=
+  LIVE_SYNC_OWNERSHIP_CAPTURE_OK=0
+  LIVE_SYNC_CAPTURED_PIDS=()
+  LIVE_SYNC_CAPTURED_IDENTITIES=()
   case "$BACKEND" in
     tmux)
       [ -n "${T:-}" ] || return 0
       leader=$(tmux display-message -p -t "$T" '#{pane_pid}' 2>/dev/null) || leader=""
       case "$leader" in ''|*[!0-9]*) return 0 ;; esac
       pgid=$(task_pid_pgid "$leader") || return 0
+      root_pid=$leader
       ;;
     herdr)
       [ -n "${T:-}" ] || return 0
@@ -2244,6 +2295,10 @@ live_sync_capture_endpoint_process_group() {
         .result.process_info.foreground_process_group_id
         | select(type == "number" and . > 1) | floor
       ' 2>/dev/null) || return 0
+      root_pid=$(printf '%s' "$info" | jq -er '
+        .result.process_info.shell_pid
+        | select(type == "number" and . > 1) | floor
+      ' 2>/dev/null) || return 0
       ;;
     *)
       return 0
@@ -2252,6 +2307,7 @@ live_sync_capture_endpoint_process_group() {
   own_pgid=$(task_pid_pgid "$$") || own_pgid=
   [ -z "$own_pgid" ] || [ "$pgid" != "$own_pgid" ] || return 0
   LIVE_SYNC_ENDPOINT_PGID=$pgid
+  live_sync_capture_endpoint_owned_processes "$root_pid" || LIVE_SYNC_OWNERSHIP_CAPTURE_OK=0
 }
 
 live_sync_refuse_lingering_processes() {  # <reason>
@@ -2345,6 +2401,52 @@ EOF
   live_sync_refuse_lingering_processes "process(es) remain in endpoint process group"
 }
 
+live_sync_reap_captured_owned_processes() {
+  local i pid identity remaining=() remaining_identity=()
+  [ "${LIVE_SYNC_OWNERSHIP_CAPTURE_OK:-0}" = 1 ] || {
+    live_sync_refuse_lingering_processes "endpoint descendant ownership could not be captured"
+    return 1
+  }
+  [ "${#LIVE_SYNC_CAPTURED_PIDS[@]}" -gt 0 ] || return 0
+  echo "teardown: reaping captured live-sync descendant process(es) for $ID: ${LIVE_SYNC_CAPTURED_PIDS[*]}" >&2
+  for i in "${!LIVE_SYNC_CAPTURED_PIDS[@]}"; do
+    pid=${LIVE_SYNC_CAPTURED_PIDS[$i]}
+    identity=${LIVE_SYNC_CAPTURED_IDENTITIES[$i]}
+    if task_process_identity_matches "$pid" "$identity"; then
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+  done
+  sleep 1
+  for i in "${!LIVE_SYNC_CAPTURED_PIDS[@]}"; do
+    pid=${LIVE_SYNC_CAPTURED_PIDS[$i]}
+    identity=${LIVE_SYNC_CAPTURED_IDENTITIES[$i]}
+    if task_process_identity_matches "$pid" "$identity"; then
+      remaining+=("$pid")
+      remaining_identity+=("$identity")
+    fi
+  done
+  if [ "${#remaining[@]}" -gt 0 ]; then
+    echo "teardown: force-killing captured live-sync descendant process(es) for $ID: ${remaining[*]}" >&2
+    for i in "${!remaining[@]}"; do
+      pid=${remaining[$i]}
+      identity=${remaining_identity[$i]}
+      if task_process_identity_matches "$pid" "$identity"; then
+        kill -KILL "$pid" 2>/dev/null || true
+      fi
+    done
+  fi
+  sleep 0.1
+  for i in "${!LIVE_SYNC_CAPTURED_PIDS[@]}"; do
+    pid=${LIVE_SYNC_CAPTURED_PIDS[$i]}
+    identity=${LIVE_SYNC_CAPTURED_IDENTITIES[$i]}
+    if task_process_identity_matches "$pid" "$identity" && ! task_pid_is_zombie "$pid"; then
+      live_sync_refuse_lingering_processes "captured descendant process $pid remains live"
+      return 1
+    fi
+  done
+  return 0
+}
+
 live_sync_require_no_lingering_processes() {
   local pids pid pgid owned_pids uncertain_pids endpoint_pids
   [ -n "${LIVE_SYNC_ROOT:-}" ] && [ -d "$LIVE_SYNC_ROOT" ] || return 0
@@ -2352,6 +2454,7 @@ live_sync_require_no_lingering_processes() {
     live_sync_refuse_lingering_processes "endpoint process group ownership was not captured"
     return 1
   fi
+  live_sync_reap_captured_owned_processes || return 1
   endpoint_pids=$(task_pids_in_pgid "$LIVE_SYNC_ENDPOINT_PGID") || {
     live_sync_refuse_lingering_processes "endpoint process group scan failed"
     return 1
@@ -3913,6 +4016,10 @@ if [ "$BACKEND" = herdr ] \
   fi
 fi
 
+if [ "$KIND" != secondmate ] && [ "$MODE" = live-sync ]; then
+  live_sync_require_no_lingering_processes || exit 1
+fi
+
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   # The presentation lock was acquired before the worktree return above; a
   # contended lock already refused this teardown while everything was intact.
@@ -3973,9 +4080,6 @@ if [ "$KIND" != secondmate ]; then
     echo "error: $ID's final outcome has not reached the parent channel; retaining every durable task record so a rerun can retry the delivery" >&2
     exit 1
   fi
-fi
-if [ "$KIND" != secondmate ] && [ "$MODE" = live-sync ]; then
-  live_sync_require_no_lingering_processes || exit 1
 fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
