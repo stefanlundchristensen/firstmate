@@ -2444,12 +2444,12 @@ live_sync_reap_captured_owned_processes() {
       return 1
     fi
   done
-  return 0
+  live_sync_refuse_lingering_processes "captured descendant ownership cannot be proven closed after reaping"
+  return 1
 }
 
 live_sync_require_no_lingering_processes() {
   local pids pid pgid owned_pids uncertain_pids endpoint_pids
-  [ -n "${LIVE_SYNC_ROOT:-}" ] && [ -d "$LIVE_SYNC_ROOT" ] || return 0
   if [ -z "${LIVE_SYNC_ENDPOINT_PGID:-}" ]; then
     live_sync_refuse_lingering_processes "endpoint process group ownership was not captured"
     return 1
@@ -2461,6 +2461,10 @@ live_sync_require_no_lingering_processes() {
   }
   if [ -n "$endpoint_pids" ]; then
     live_sync_reap_endpoint_pids "$endpoint_pids" pgid || return 1
+  fi
+  if [ -z "${LIVE_SYNC_ROOT:-}" ] || [ ! -d "$LIVE_SYNC_ROOT" ]; then
+    live_sync_refuse_lingering_processes "live root is unavailable"
+    return 1
   fi
   if ! command -v lsof >/dev/null 2>&1; then
     live_sync_refuse_lingering_processes "lsof unavailable"

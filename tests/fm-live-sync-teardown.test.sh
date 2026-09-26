@@ -137,6 +137,20 @@ else:
   printf '%s\n' "$!"
 }
 
+start_endpoint_with_trap_spawner() {  # <vault> <child-pid-file> <spawned-pid-file>
+  python3 -c 'import os, signal, sys, time; os.setsid(); child=os.fork();
+if child == 0:
+    def term(_signum, _frame):
+        spawned=os.fork()
+        if spawned == 0:
+            os.setsid(); os.chdir("/tmp"); open(os.path.join(sys.argv[1], "Note.md"), "a").write("spawned\\n"); time.sleep(300)
+        open(sys.argv[3], "w").write(str(spawned)); sys.exit(0)
+    signal.signal(signal.SIGTERM, term); time.sleep(300)
+else:
+    open(sys.argv[2], "w").write(str(child)); time.sleep(300)' "$1" "$2" "$3" </dev/null >/dev/null 2>&1 &
+  printf '%s\n' "$!"
+}
+
 wait_for_file() {  # <file>
   local file=$1 i=0
   while [ "$i" -lt 50 ]; do
@@ -155,6 +169,14 @@ wait_for_pid() {  # <pid>
     i=$((i + 1))
   done
   return 1
+}
+
+pid_is_live_non_zombie() {  # <pid>
+  local stat
+  kill -0 "$1" 2>/dev/null || return 1
+  stat=$(ps -o stat= -p "$1" 2>/dev/null) || return 1
+  stat=$(printf '%s' "$stat" | tr -d '[:space:]')
+  case "$stat" in Z*) return 1 ;; *) return 0 ;; esac
 }
 
 wait_for_lsof_cwd() {  # <pid> <dir>
@@ -252,7 +274,7 @@ EOF
   pass "live-sync teardown stops owned endpoint writers outside the vault cwd before releasing locks"
 }
 
-test_detached_endpoint_descendant_writer_is_stopped_before_lock_release() {
+test_detached_endpoint_descendant_writer_retains_lock_after_reap() {
   local case_dir vault pidfile endpoint_pid writer_pid rc=0
   case_dir=$(make_live_case detached-descendant 0)
   vault="$case_dir/vault"
@@ -272,17 +294,81 @@ esac
 EOF
   chmod +x "$case_dir/fakebin/tmux"
   run_live_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-  [ "$rc" -eq 0 ] || { kill "$endpoint_pid" "$writer_pid" 2>/dev/null || true; wait "$endpoint_pid" 2>/dev/null || true; wait "$writer_pid" 2>/dev/null || true; fail "detached descendant writer teardown failed"; }
-  if kill -0 "$writer_pid" 2>/dev/null; then
+  expect_code 1 "$rc" "detached descendant ownership should retain live-sync lock"
+  if pid_is_live_non_zombie "$writer_pid"; then
     kill "$endpoint_pid" "$writer_pid" 2>/dev/null || true
     wait "$endpoint_pid" 2>/dev/null || true
     wait "$writer_pid" 2>/dev/null || true
-    fail "detached descendant writer survived teardown"
+    fail "detached descendant writer survived reaping"
   fi
-  assert_absent "$case_dir/state/task-x1.meta" "detached descendant writer left task metadata after cleanup"
-  assert_absent "$case_dir/state/live-sync-locks/task-x1.lock" "detached descendant writer left live-sync lock after cleanup"
-  assert_grep "captured live-sync descendant" "$case_dir/stderr" "detached descendant cleanup did not report captured descendant reaping"
-  pass "live-sync teardown stops detached endpoint descendants before releasing locks"
+  assert_present "$case_dir/state/task-x1.meta" "detached descendant writer removed task metadata despite uncertain ownership closure"
+  assert_present "$case_dir/state/live-sync-locks/task-x1.lock" "detached descendant writer released live-sync lock despite uncertain ownership closure"
+  assert_grep "cannot be proven closed" "$case_dir/stderr" "detached descendant refusal did not name unclosed ownership proof"
+  pass "live-sync teardown retains locks after reaping detached descendants"
+}
+
+test_trap_spawned_detached_writer_retains_lock() {
+  local case_dir vault child_pidfile spawned_pidfile endpoint_pid child_pid spawned_pid rc=0
+  case_dir=$(make_live_case trap-spawner 0)
+  vault="$case_dir/vault"
+  child_pidfile="$case_dir/trap-child.pid"
+  spawned_pidfile="$case_dir/spawned-writer.pid"
+  endpoint_pid=$(start_endpoint_with_trap_spawner "$vault" "$child_pidfile" "$spawned_pidfile")
+  wait_for_pid "$endpoint_pid" || { kill "$endpoint_pid" 2>/dev/null || true; fail "endpoint process never started"; }
+  wait_for_file "$child_pidfile" || { kill "$endpoint_pid" 2>/dev/null || true; fail "trap child pid was not recorded"; }
+  child_pid=$(<"$child_pidfile")
+  wait_for_pid "$child_pid" || { kill "$endpoint_pid" "$child_pid" 2>/dev/null || true; fail "trap child never started"; }
+  rm -f "$case_dir/fakebin/tmux"
+  cat > "$case_dir/fakebin/tmux" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}" in
+  display-message) printf '%s\n' '$endpoint_pid' ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$case_dir/fakebin/tmux"
+  run_live_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "trap-spawned writer should retain live-sync lock"
+  wait_for_file "$spawned_pidfile" || { kill "$endpoint_pid" "$child_pid" 2>/dev/null || true; fail "trap-spawned writer pid was not recorded"; }
+  spawned_pid=$(<"$spawned_pidfile")
+  if ! kill -0 "$spawned_pid" 2>/dev/null; then
+    wait "$spawned_pid" 2>/dev/null || true
+    fail "trap-spawned detached writer was unexpectedly killed"
+  fi
+  kill "$endpoint_pid" "$child_pid" "$spawned_pid" 2>/dev/null || true
+  wait "$endpoint_pid" 2>/dev/null || true
+  wait "$child_pid" 2>/dev/null || true
+  wait "$spawned_pid" 2>/dev/null || true
+  assert_present "$case_dir/state/task-x1.meta" "trap-spawned writer removed task metadata"
+  assert_present "$case_dir/state/live-sync-locks/task-x1.lock" "trap-spawned writer released live-sync lock"
+  assert_grep "cannot be proven closed" "$case_dir/stderr" "trap-spawned writer refusal did not name unclosed ownership proof"
+  pass "live-sync teardown retains locks for trap-spawned detached writers"
+}
+
+test_missing_live_root_retains_lock_after_endpoint_reap() {
+  local case_dir vault pid rc=0
+  case_dir=$(make_live_case missing-root 0)
+  vault="$case_dir/vault"
+  pid=$(start_owned_group_writer_outside_vault "$vault")
+  wait_for_pid "$pid" || { kill "$pid" 2>/dev/null || true; fail "missing-root endpoint writer never started"; }
+  mv "$vault" "$vault.gone" || { kill "$pid" 2>/dev/null || true; fail "could not make live root unavailable"; }
+  rm -f "$case_dir/fakebin/tmux"
+  cat > "$case_dir/fakebin/tmux" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}" in
+  display-message) printf '%s\n' '$pid' ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$case_dir/fakebin/tmux"
+  run_live_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "missing live root should retain live-sync lock"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  assert_present "$case_dir/state/task-x1.meta" "missing live root removed task metadata"
+  assert_present "$case_dir/state/live-sync-locks/task-x1.lock" "missing live root released live-sync lock"
+  assert_grep "REFUSED: live-sync task" "$case_dir/stderr" "missing live root did not refuse live-sync cleanup"
+  pass "live-sync teardown retains locks when the live root is unavailable"
 }
 
 test_herdr_endpoint_writer_outside_vault_is_stopped_before_lock_release() {
@@ -328,6 +414,8 @@ test_missing_endpoint_ownership_retains_lock_without_killing_writer() {
 test_uncertain_live_root_process_retains_lock
 test_owned_live_root_process_is_stopped_before_lock_release
 test_owned_endpoint_writer_outside_vault_is_stopped_before_lock_release
-test_detached_endpoint_descendant_writer_is_stopped_before_lock_release
+test_detached_endpoint_descendant_writer_retains_lock_after_reap
+test_trap_spawned_detached_writer_retains_lock
+test_missing_live_root_retains_lock_after_endpoint_reap
 test_herdr_endpoint_writer_outside_vault_is_stopped_before_lock_release
 test_missing_endpoint_ownership_retains_lock_without_killing_writer
