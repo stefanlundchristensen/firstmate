@@ -2327,14 +2327,16 @@ EOF
 live_sync_require_no_lingering_processes() {
   local pids pid pgid owned_pids uncertain_pids endpoint_pids
   [ -n "${LIVE_SYNC_ROOT:-}" ] && [ -d "$LIVE_SYNC_ROOT" ] || return 0
-  if [ -n "${LIVE_SYNC_ENDPOINT_PGID:-}" ]; then
-    endpoint_pids=$(task_pids_in_pgid "$LIVE_SYNC_ENDPOINT_PGID") || {
-      live_sync_refuse_lingering_processes "endpoint process group scan failed"
-      return 1
-    }
-    if [ -n "$endpoint_pids" ]; then
-      live_sync_reap_endpoint_pids "$endpoint_pids" pgid || return 1
-    fi
+  if [ -z "${LIVE_SYNC_ENDPOINT_PGID:-}" ]; then
+    live_sync_refuse_lingering_processes "endpoint process group ownership was not captured"
+    return 1
+  fi
+  endpoint_pids=$(task_pids_in_pgid "$LIVE_SYNC_ENDPOINT_PGID") || {
+    live_sync_refuse_lingering_processes "endpoint process group scan failed"
+    return 1
+  }
+  if [ -n "$endpoint_pids" ]; then
+    live_sync_reap_endpoint_pids "$endpoint_pids" pgid || return 1
   fi
   if ! command -v lsof >/dev/null 2>&1; then
     live_sync_refuse_lingering_processes "lsof unavailable"
@@ -2351,7 +2353,7 @@ live_sync_require_no_lingering_processes() {
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
     pgid=$(task_pid_pgid "$pid" 2>/dev/null) || pgid=
-    if [ -n "${LIVE_SYNC_ENDPOINT_PGID:-}" ] && [ "$pgid" = "$LIVE_SYNC_ENDPOINT_PGID" ]; then
+    if [ "$pgid" = "$LIVE_SYNC_ENDPOINT_PGID" ]; then
       owned_pids="$owned_pids
 $pid"
     else

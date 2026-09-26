@@ -102,14 +102,26 @@ wait_for_lsof_cwd() {  # <pid> <dir>
 }
 
 test_uncertain_live_root_process_retains_lock() {
-  local case_dir vault pid rc=0
+  local case_dir vault pid endpoint_pid rc=0
   case_dir=$(make_live_case uncertain 0)
   vault="$case_dir/vault"
+  endpoint_pid=$(start_owned_group_writer_outside_vault "$vault")
+  wait_for_pid "$endpoint_pid" || { kill "$endpoint_pid" 2>/dev/null || true; fail "endpoint process never started"; }
+  rm -f "$case_dir/fakebin/tmux"
+  cat > "$case_dir/fakebin/tmux" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}" in
+  display-message) printf '%s\n' '$endpoint_pid' ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$case_dir/fakebin/tmux"
   pid=$(start_detached_in_vault "$vault")
-  wait_for_lsof_cwd "$pid" "$vault" || { kill "$pid" 2>/dev/null || true; fail "uncertain live-root process never appeared in lsof"; }
+  wait_for_lsof_cwd "$pid" "$vault" || { kill "$pid" "$endpoint_pid" 2>/dev/null || true; fail "uncertain live-root process never appeared in lsof"; }
   run_live_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-  kill "$pid" 2>/dev/null || true
+  kill "$pid" "$endpoint_pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
+  wait "$endpoint_pid" 2>/dev/null || true
   expect_code 1 "$rc" "uncertain live-root process should refuse teardown"
   assert_present "$case_dir/state/task-x1.meta" "uncertain live-root process removed task metadata"
   assert_present "$case_dir/state/live-sync-locks/task-x1.lock" "uncertain live-root process released the live-sync lock"
@@ -173,6 +185,27 @@ EOF
   pass "live-sync teardown stops owned endpoint writers outside the vault cwd before releasing locks"
 }
 
+test_missing_endpoint_ownership_retains_lock_without_killing_writer() {
+  local case_dir vault pid rc=0
+  case_dir=$(make_live_case missing-endpoint 0)
+  vault="$case_dir/vault"
+  pid=$(start_owned_group_writer_outside_vault "$vault")
+  wait_for_pid "$pid" || { kill "$pid" 2>/dev/null || true; fail "outside-vault writer never started"; }
+  run_live_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "missing endpoint ownership should refuse teardown"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null || true
+    fail "missing endpoint ownership path killed an unproven writer"
+  fi
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  assert_present "$case_dir/state/task-x1.meta" "missing endpoint ownership removed task metadata"
+  assert_present "$case_dir/state/live-sync-locks/task-x1.lock" "missing endpoint ownership released the live-sync lock"
+  assert_grep "ownership was not captured" "$case_dir/stderr" "missing endpoint ownership refusal did not name missing proof"
+  pass "live-sync teardown retains locks when endpoint ownership is missing"
+}
+
 test_uncertain_live_root_process_retains_lock
 test_owned_live_root_process_is_stopped_before_lock_release
 test_owned_endpoint_writer_outside_vault_is_stopped_before_lock_release
+test_missing_endpoint_ownership_retains_lock_without_killing_writer
