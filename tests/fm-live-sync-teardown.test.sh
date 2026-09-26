@@ -75,6 +75,21 @@ start_owned_group_in_vault() {  # <vault>
   printf '%s\n' "$!"
 }
 
+start_owned_group_writer_outside_vault() {  # <vault>
+  python3 -c 'import os, sys, time; os.setsid(); os.chdir("/tmp"); path=os.path.join(sys.argv[1], "Note.md"); open(path, "a").write("started\\n"); time.sleep(300)' "$1" </dev/null >/dev/null 2>&1 &
+  printf '%s\n' "$!"
+}
+
+wait_for_pid() {  # <pid>
+  local pid=$1 i=0
+  while [ "$i" -lt 50 ]; do
+    kill -0 "$pid" 2>/dev/null && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 wait_for_lsof_cwd() {  # <pid> <dir>
   local pid=$1 dir=$2 i=0 out
   while [ "$i" -lt 50 ]; do
@@ -130,5 +145,34 @@ EOF
   pass "live-sync teardown stops owned live-root processes before releasing locks"
 }
 
+test_owned_endpoint_writer_outside_vault_is_stopped_before_lock_release() {
+  local case_dir vault pid rc=0
+  case_dir=$(make_live_case owned-outside 0)
+  vault="$case_dir/vault"
+  pid=$(start_owned_group_writer_outside_vault "$vault")
+  wait_for_pid "$pid" || { kill "$pid" 2>/dev/null || true; fail "owned outside-vault writer never started"; }
+  rm -f "$case_dir/fakebin/tmux"
+  cat > "$case_dir/fakebin/tmux" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}" in
+  display-message) printf '%s\n' '$pid' ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$case_dir/fakebin/tmux"
+  run_live_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -eq 0 ] || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "owned outside-vault writer teardown failed"; }
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "owned outside-vault writer survived teardown"
+  fi
+  assert_absent "$case_dir/state/task-x1.meta" "owned outside-vault writer left task metadata after cleanup"
+  assert_absent "$case_dir/state/live-sync-locks/task-x1.lock" "owned outside-vault writer left live-sync lock after cleanup"
+  assert_grep "reaping leaked live-sync process" "$case_dir/stderr" "owned outside-vault writer cleanup did not report process reaping"
+  pass "live-sync teardown stops owned endpoint writers outside the vault cwd before releasing locks"
+}
+
 test_uncertain_live_root_process_retains_lock
 test_owned_live_root_process_is_stopped_before_lock_release
+test_owned_endpoint_writer_outside_vault_is_stopped_before_lock_release

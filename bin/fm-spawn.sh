@@ -3294,7 +3294,7 @@ if [ "$KIND" = ship ]; then
 fi
 
 if [ "$KIND" = ship ] && [ "$MODE" = live-sync ]; then
-  if ! fm_live_sync_acquire_task "$STATE" "$ID" "$PROJ_NAME" "$PROJ_ABS" "$LIVE_SYNC_POLICY_ABS" "${LIVE_SCOPES[@]}"; then
+  if ! FM_LIVE_SYNC_ACQUIRE_REUSE_SAME_ID=$RELAUNCH fm_live_sync_acquire_task "$STATE" "$ID" "$PROJ_NAME" "$PROJ_ABS" "$LIVE_SYNC_POLICY_ABS" "${LIVE_SCOPES[@]}"; then
     echo "error: live-sync scope lock refused for $ID: $FM_LIVE_SYNC_ERROR" >&2
     exit 1
   fi

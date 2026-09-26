@@ -80,6 +80,10 @@ test_scope_locks_exclude_only_overlaps() {
   policy=$(fm_live_sync_canonical_policy "$root" "$policy") || fail "policy did not canonicalize"
 
   fm_live_sync_acquire_task "$state" t1 vault "$root" "$policy" Notes/a.md || fail "initial lock should pass"
+  out=$(fm_live_sync_acquire_task "$state" t1 vault "$root" "$policy" Notes/b.md 2>&1)
+  [ "$?" -ne 0 ] || fail "duplicate same-task fresh lock unexpectedly passed"
+  assert_contains "$out" "already has an active scope lock" "duplicate same-task lock refusal did not name the active lock"
+  FM_LIVE_SYNC_ACQUIRE_REUSE_SAME_ID=1 fm_live_sync_acquire_task "$state" t1 vault "$root" "$policy" Notes/a.md || fail "same-task relaunch lock reuse should pass"
   out=$(fm_live_sync_acquire_task "$state" t2 vault "$root" "$policy" Notes/a.md 2>&1)
   [ "$?" -ne 0 ] || fail "overlapping lock unexpectedly passed"
   assert_contains "$out" "overlaps active task t1" "overlapping lock refusal did not name the owning task"

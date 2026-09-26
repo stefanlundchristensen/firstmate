@@ -426,6 +426,13 @@ fm_live_sync_acquire_task() {  # <state-dir> <task-id> <project-name> <root-abs>
   }
   mkdir -p "$lockdir" || return 1
   fm_lock_acquire_wait "$index_lock" || return 1
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    if [ "${FM_LIVE_SYNC_ACQUIRE_REUSE_SAME_ID:-0}" != 1 ]; then
+      fm_lock_release "$index_lock" || true
+      fm_live_sync_error "live-sync task $id already has an active scope lock"
+      return 1
+    fi
+  fi
   for other in "$lockdir"/*.lock; do
     [ -e "$other" ] || continue
     [ "$other" != "$record" ] || continue

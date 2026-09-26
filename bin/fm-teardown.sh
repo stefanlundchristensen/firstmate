@@ -2213,6 +2213,12 @@ $dir_pids"
   TASK_PIDS=$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un || true)
 }
 
+task_pids_in_pgid() {  # <pgid>
+  local pgid=$1
+  case "$pgid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+  ps -axo pid=,pgid= 2>/dev/null | awk -v want="$pgid" -v self="$$" '$2 == want && $1 != self { print $1 }' | sort -un
+}
+
 live_sync_capture_endpoint_process_group() {
   local leader pgid own_pgid
   LIVE_SYNC_ENDPOINT_PGID=
@@ -2232,47 +2238,31 @@ live_sync_refuse_lingering_processes() {  # <reason>
   return 1
 }
 
-live_sync_require_no_lingering_processes() {
-  local pids pid pgid owned_pids uncertain_pids current_pids i pass=1 max_passes=3
+live_sync_scan_owned_pids() {  # <pgid|root>
+  case "$1" in
+    pgid) task_pids_in_pgid "$LIVE_SYNC_ENDPOINT_PGID" ;;
+    root)
+      task_pids_under_roots "$LIVE_SYNC_ROOT" || return 1
+      printf '%s\n' "$TASK_PIDS"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+live_sync_reap_endpoint_pids() {  # <pid-list> <scan-kind>
+  local pids=$1 scan_kind=$2 pid identity i current_pids pass=1 max_passes=3
   local -a tracked_pids tracked_identities remaining_pids remaining_identities
-  [ -n "${LIVE_SYNC_ROOT:-}" ] && [ -d "$LIVE_SYNC_ROOT" ] || return 0
-  if ! command -v lsof >/dev/null 2>&1; then
-    live_sync_refuse_lingering_processes "lsof unavailable"
-    return 1
-  fi
   while [ "$pass" -le "$max_passes" ]; do
-    if ! task_pids_under_roots "$LIVE_SYNC_ROOT"; then
-      live_sync_refuse_lingering_processes "lsof failed"
-      return 1
-    fi
-    pids=$TASK_PIDS
+    pids=$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un || true)
     [ -n "$pids" ] || return 0
-    owned_pids=
-    uncertain_pids=
-    while IFS= read -r pid; do
-      [ -n "$pid" ] || continue
-      pgid=$(task_pid_pgid "$pid" 2>/dev/null) || pgid=
-      if [ -n "${LIVE_SYNC_ENDPOINT_PGID:-}" ] && [ "$pgid" = "$LIVE_SYNC_ENDPOINT_PGID" ]; then
-        owned_pids="$owned_pids
-$pid"
-      else
-        uncertain_pids="$uncertain_pids
-$pid"
-      fi
-    done <<EOF
-$pids
-EOF
-    uncertain_pids=$(printf '%s\n' "$uncertain_pids" | grep -E '^[0-9]+$' | sort -un || true)
-    if [ -n "$uncertain_pids" ]; then
-      live_sync_refuse_lingering_processes "unattributed process(es) under live root: $(printf '%s' "$uncertain_pids" | tr '\n' ' ')"
-      return 1
-    fi
-    owned_pids=$(printf '%s\n' "$owned_pids" | grep -E '^[0-9]+$' | sort -un || true)
-    [ -n "$owned_pids" ] || return 0
     tracked_pids=()
     tracked_identities=()
     while IFS= read -r pid; do
       [ -n "$pid" ] || continue
+      if [ "$(task_pid_pgid "$pid" 2>/dev/null || true)" != "$LIVE_SYNC_ENDPOINT_PGID" ]; then
+        live_sync_refuse_lingering_processes "process $pid no longer belongs to the endpoint process group"
+        return 1
+      fi
       if ! identity=$(task_process_identity "$pid"); then
         live_sync_refuse_lingering_processes "cannot verify process $pid identity"
         return 1
@@ -2280,14 +2270,13 @@ EOF
       tracked_pids+=("$pid")
       tracked_identities+=("$identity")
     done <<EOF
-$owned_pids
+$pids
 EOF
-    echo "teardown: reaping leaked live-sync process(es) for $ID: $(printf '%s' "$owned_pids" | tr '\n' ' ')" >&2
-    if ! task_pids_under_roots "$LIVE_SYNC_ROOT"; then
-      live_sync_refuse_lingering_processes "lsof failed"
+    echo "teardown: reaping leaked live-sync process(es) for $ID: $(printf '%s' "$pids" | tr '\n' ' ')" >&2
+    current_pids=$(live_sync_scan_owned_pids "$scan_kind") || {
+      live_sync_refuse_lingering_processes "process ownership scan failed"
       return 1
-    fi
-    current_pids=$TASK_PIDS
+    }
     for i in "${!tracked_pids[@]}"; do
       pid=${tracked_pids[$i]}
       identity=${tracked_identities[$i]}
@@ -2300,11 +2289,10 @@ EOF
     sleep 1
     remaining_pids=()
     remaining_identities=()
-    if ! task_pids_under_roots "$LIVE_SYNC_ROOT"; then
-      live_sync_refuse_lingering_processes "lsof failed"
+    current_pids=$(live_sync_scan_owned_pids "$scan_kind") || {
+      live_sync_refuse_lingering_processes "process ownership scan failed"
       return 1
-    fi
-    current_pids=$TASK_PIDS
+    }
     for i in "${!tracked_pids[@]}"; do
       pid=${tracked_pids[$i]}
       identity=${tracked_identities[$i]}
@@ -2326,8 +2314,61 @@ EOF
         fi
       done
     fi
+    pids=$(live_sync_scan_owned_pids "$scan_kind") || {
+      live_sync_refuse_lingering_processes "process ownership scan failed"
+      return 1
+    }
     pass=$((pass + 1))
   done
+  [ -z "$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un || true)" ] && return 0
+  live_sync_refuse_lingering_processes "process(es) remain in endpoint process group"
+}
+
+live_sync_require_no_lingering_processes() {
+  local pids pid pgid owned_pids uncertain_pids endpoint_pids
+  [ -n "${LIVE_SYNC_ROOT:-}" ] && [ -d "$LIVE_SYNC_ROOT" ] || return 0
+  if [ -n "${LIVE_SYNC_ENDPOINT_PGID:-}" ]; then
+    endpoint_pids=$(task_pids_in_pgid "$LIVE_SYNC_ENDPOINT_PGID") || {
+      live_sync_refuse_lingering_processes "endpoint process group scan failed"
+      return 1
+    }
+    if [ -n "$endpoint_pids" ]; then
+      live_sync_reap_endpoint_pids "$endpoint_pids" pgid || return 1
+    fi
+  fi
+  if ! command -v lsof >/dev/null 2>&1; then
+    live_sync_refuse_lingering_processes "lsof unavailable"
+    return 1
+  fi
+  if ! task_pids_under_roots "$LIVE_SYNC_ROOT"; then
+    live_sync_refuse_lingering_processes "lsof failed"
+    return 1
+  fi
+  pids=$TASK_PIDS
+  [ -n "$pids" ] || return 0
+  owned_pids=
+  uncertain_pids=
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    pgid=$(task_pid_pgid "$pid" 2>/dev/null) || pgid=
+    if [ -n "${LIVE_SYNC_ENDPOINT_PGID:-}" ] && [ "$pgid" = "$LIVE_SYNC_ENDPOINT_PGID" ]; then
+      owned_pids="$owned_pids
+$pid"
+    else
+      uncertain_pids="$uncertain_pids
+$pid"
+    fi
+  done <<EOF
+$pids
+EOF
+  uncertain_pids=$(printf '%s\n' "$uncertain_pids" | grep -E '^[0-9]+$' | sort -un || true)
+  if [ -n "$uncertain_pids" ]; then
+    live_sync_refuse_lingering_processes "unattributed process(es) under live root: $(printf '%s' "$uncertain_pids" | tr '\n' ' ')"
+    return 1
+  fi
+  owned_pids=$(printf '%s\n' "$owned_pids" | grep -E '^[0-9]+$' | sort -un || true)
+  [ -n "$owned_pids" ] || return 0
+  live_sync_reap_endpoint_pids "$owned_pids" root || return 1
   if ! task_pids_under_roots "$LIVE_SYNC_ROOT"; then
     live_sync_refuse_lingering_processes "lsof failed"
     return 1
