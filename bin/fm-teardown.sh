@@ -1116,6 +1116,7 @@ PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
+LIVE_SYNC_ROOT=$(fm_meta_get "$META" live_sync_root)
 BUSY_GEN=$(fm_meta_get "$META" busy_gen)
 if [ -z "$BUSY_GEN" ]; then
   BUSY_GEN=$(cat "$STATE/$ID.busy-gen" 2>/dev/null || true)
@@ -2188,6 +2189,14 @@ task_pid_list_contains() {  # <pid-list> <pid>
   printf '%s\n' "$1" | grep -Fxq "$2"
 }
 
+task_pid_pgid() {  # <pid>
+  local pgid
+  pgid=$(ps -o pgid= -p "$1" 2>/dev/null) || return 1
+  pgid=$(printf '%s' "$pgid" | tr -d '[:space:]')
+  case "$pgid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+  printf '%s\n' "$pgid"
+}
+
 task_pids_under_roots() {  # <dir>...
   TASK_PIDS=
   TASK_PIDS_FAILED_DIR=
@@ -2202,6 +2211,129 @@ task_pids_under_roots() {  # <dir>...
 $dir_pids"
   done
   TASK_PIDS=$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un || true)
+}
+
+live_sync_capture_endpoint_process_group() {
+  local leader pgid own_pgid
+  LIVE_SYNC_ENDPOINT_PGID=
+  if [ "$BACKEND" != tmux ] || [ -z "${T:-}" ]; then
+    return 0
+  fi
+  leader=$(tmux display-message -p -t "$T" '#{pane_pid}' 2>/dev/null) || leader=""
+  case "$leader" in ''|*[!0-9]*) return 0 ;; esac
+  pgid=$(task_pid_pgid "$leader") || return 0
+  own_pgid=$(task_pid_pgid "$$") || own_pgid=
+  [ -z "$own_pgid" ] || [ "$pgid" != "$own_pgid" ] || return 0
+  LIVE_SYNC_ENDPOINT_PGID=$pgid
+}
+
+live_sync_refuse_lingering_processes() {  # <reason>
+  echo "REFUSED: live-sync task $ID still has process ownership that cannot be proven stopped ($1); retaining its scope lock and durable task record." >&2
+  return 1
+}
+
+live_sync_require_no_lingering_processes() {
+  local pids pid pgid owned_pids uncertain_pids current_pids i pass=1 max_passes=3
+  local -a tracked_pids tracked_identities remaining_pids remaining_identities
+  [ -n "${LIVE_SYNC_ROOT:-}" ] && [ -d "$LIVE_SYNC_ROOT" ] || return 0
+  if ! command -v lsof >/dev/null 2>&1; then
+    live_sync_refuse_lingering_processes "lsof unavailable"
+    return 1
+  fi
+  while [ "$pass" -le "$max_passes" ]; do
+    if ! task_pids_under_roots "$LIVE_SYNC_ROOT"; then
+      live_sync_refuse_lingering_processes "lsof failed"
+      return 1
+    fi
+    pids=$TASK_PIDS
+    [ -n "$pids" ] || return 0
+    owned_pids=
+    uncertain_pids=
+    while IFS= read -r pid; do
+      [ -n "$pid" ] || continue
+      pgid=$(task_pid_pgid "$pid" 2>/dev/null) || pgid=
+      if [ -n "${LIVE_SYNC_ENDPOINT_PGID:-}" ] && [ "$pgid" = "$LIVE_SYNC_ENDPOINT_PGID" ]; then
+        owned_pids="$owned_pids
+$pid"
+      else
+        uncertain_pids="$uncertain_pids
+$pid"
+      fi
+    done <<EOF
+$pids
+EOF
+    uncertain_pids=$(printf '%s\n' "$uncertain_pids" | grep -E '^[0-9]+$' | sort -un || true)
+    if [ -n "$uncertain_pids" ]; then
+      live_sync_refuse_lingering_processes "unattributed process(es) under live root: $(printf '%s' "$uncertain_pids" | tr '\n' ' ')"
+      return 1
+    fi
+    owned_pids=$(printf '%s\n' "$owned_pids" | grep -E '^[0-9]+$' | sort -un || true)
+    [ -n "$owned_pids" ] || return 0
+    tracked_pids=()
+    tracked_identities=()
+    while IFS= read -r pid; do
+      [ -n "$pid" ] || continue
+      if ! identity=$(task_process_identity "$pid"); then
+        live_sync_refuse_lingering_processes "cannot verify process $pid identity"
+        return 1
+      fi
+      tracked_pids+=("$pid")
+      tracked_identities+=("$identity")
+    done <<EOF
+$owned_pids
+EOF
+    echo "teardown: reaping leaked live-sync process(es) for $ID: $(printf '%s' "$owned_pids" | tr '\n' ' ')" >&2
+    if ! task_pids_under_roots "$LIVE_SYNC_ROOT"; then
+      live_sync_refuse_lingering_processes "lsof failed"
+      return 1
+    fi
+    current_pids=$TASK_PIDS
+    for i in "${!tracked_pids[@]}"; do
+      pid=${tracked_pids[$i]}
+      identity=${tracked_identities[$i]}
+      if task_pid_list_contains "$current_pids" "$pid" \
+         && task_process_identity_matches "$pid" "$identity" \
+         && [ "$(task_pid_pgid "$pid" 2>/dev/null || true)" = "$LIVE_SYNC_ENDPOINT_PGID" ]; then
+        kill -TERM "$pid" 2>/dev/null || true
+      fi
+    done
+    sleep 1
+    remaining_pids=()
+    remaining_identities=()
+    if ! task_pids_under_roots "$LIVE_SYNC_ROOT"; then
+      live_sync_refuse_lingering_processes "lsof failed"
+      return 1
+    fi
+    current_pids=$TASK_PIDS
+    for i in "${!tracked_pids[@]}"; do
+      pid=${tracked_pids[$i]}
+      identity=${tracked_identities[$i]}
+      if task_pid_list_contains "$current_pids" "$pid" \
+         && task_process_identity_matches "$pid" "$identity" \
+         && [ "$(task_pid_pgid "$pid" 2>/dev/null || true)" = "$LIVE_SYNC_ENDPOINT_PGID" ]; then
+        remaining_pids+=("$pid")
+        remaining_identities+=("$identity")
+      fi
+    done
+    if [ "${#remaining_pids[@]}" -gt 0 ]; then
+      echo "teardown: force-killing leaked live-sync process(es) for $ID: ${remaining_pids[*]}" >&2
+      for i in "${!remaining_pids[@]}"; do
+        pid=${remaining_pids[$i]}
+        identity=${remaining_identities[$i]}
+        if task_process_identity_matches "$pid" "$identity" \
+           && [ "$(task_pid_pgid "$pid" 2>/dev/null || true)" = "$LIVE_SYNC_ENDPOINT_PGID" ]; then
+          kill -KILL "$pid" 2>/dev/null || true
+        fi
+      done
+    fi
+    pass=$((pass + 1))
+  done
+  if ! task_pids_under_roots "$LIVE_SYNC_ROOT"; then
+    live_sync_refuse_lingering_processes "lsof failed"
+    return 1
+  fi
+  [ -z "$TASK_PIDS" ] && return 0
+  live_sync_refuse_lingering_processes "process(es) remain under live root"
 }
 
 reap_task_backend_process_group() {  # <label>
@@ -2220,15 +2352,13 @@ reap_task_backend_process_group() {  # <label>
     echo "warning: lsof is unavailable; cannot identify the tmux pane process group for $ID" >&2
     return 0
   }
-  pgid=$(ps -o pgid= -p "$leader" 2>/dev/null) || pgid=""
-  pgid=$(printf '%s' "$pgid" | tr -d '[:space:]')
-  case "$pgid" in ''|*[!0-9]*|0|1)
+  pgid=$(task_pid_pgid "$leader") || pgid=""
+  case "$pgid" in '')
     echo "warning: lsof is unavailable; cannot resolve the tmux pane process group for $ID" >&2
     return 0
     ;;
   esac
-  own_pgid=$(ps -o pgid= -p "$$" 2>/dev/null) || own_pgid=""
-  own_pgid=$(printf '%s' "$own_pgid" | tr -d '[:space:]')
+  own_pgid=$(task_pid_pgid "$$" 2>/dev/null) || own_pgid=""
   if [ "$pgid" = "$own_pgid" ]; then
     echo "warning: lsof is unavailable; refusing to signal teardown's own process group for $ID" >&2
     return 0
@@ -2384,6 +2514,7 @@ require_orca_worktree_path_match_if_present() {
 # record with nothing live to return skips them rather than refusing.
 teardown_live_slot_path() {
   [ "$KIND" != secondmate ] || return 1
+  [ "$MODE" != live-sync ] || return 1
   fm_treehouse_pool_slot "$PROJ" "$WT" || return 1
   canonical_existing_dir "$WT"
 }
@@ -3629,6 +3760,7 @@ fi
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ] && [ "$MODE" = live-sync ]; then
+  live_sync_capture_endpoint_process_group
   reap_task_worktree_processes tasktmp "$TASK_TMP"
 elif [ "$KIND" != secondmate ] && teardown_owns_worktree; then
   conclude_task_no_mistakes_run "$WT"
@@ -3777,6 +3909,9 @@ if [ "$KIND" != secondmate ]; then
     echo "error: $ID's final outcome has not reached the parent channel; retaining every durable task record so a rerun can retry the delivery" >&2
     exit 1
   fi
+fi
+if [ "$KIND" != secondmate ] && [ "$MODE" = live-sync ]; then
+  live_sync_require_no_lingering_processes || exit 1
 fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
