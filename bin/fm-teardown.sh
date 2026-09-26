@@ -2407,7 +2407,11 @@ live_sync_reap_captured_owned_processes() {
     live_sync_refuse_lingering_processes "endpoint descendant ownership could not be captured"
     return 1
   }
-  [ "${#LIVE_SYNC_CAPTURED_PIDS[@]}" -gt 0 ] || return 0
+  if [ "${#LIVE_SYNC_CAPTURED_PIDS[@]}" -eq 0 ]; then
+    LIVE_SYNC_DESCENDANT_PROOF_CLOSED=0
+    return 0
+  fi
+  LIVE_SYNC_DESCENDANT_PROOF_CLOSED=0
   echo "teardown: reaping captured live-sync descendant process(es) for $ID: ${LIVE_SYNC_CAPTURED_PIDS[*]}" >&2
   for i in "${!LIVE_SYNC_CAPTURED_PIDS[@]}"; do
     pid=${LIVE_SYNC_CAPTURED_PIDS[$i]}
@@ -2454,6 +2458,7 @@ live_sync_require_no_lingering_processes() {
     live_sync_refuse_lingering_processes "endpoint process group ownership was not captured"
     return 1
   fi
+  LIVE_SYNC_DESCENDANT_PROOF_CLOSED=1
   live_sync_reap_captured_owned_processes || return 1
   endpoint_pids=$(task_pids_in_pgid "$LIVE_SYNC_ENDPOINT_PGID") || {
     live_sync_refuse_lingering_processes "endpoint process group scan failed"
@@ -2475,7 +2480,11 @@ live_sync_require_no_lingering_processes() {
     return 1
   fi
   pids=$TASK_PIDS
-  [ -n "$pids" ] || return 0
+  if [ -z "$pids" ]; then
+    [ "${LIVE_SYNC_DESCENDANT_PROOF_CLOSED:-0}" = 1 ] && return 0
+    live_sync_refuse_lingering_processes "detached task-owned writer absence cannot be proven"
+    return 1
+  fi
   owned_pids=
   uncertain_pids=
   while IFS= read -r pid; do
@@ -2497,13 +2506,21 @@ EOF
     return 1
   fi
   owned_pids=$(printf '%s\n' "$owned_pids" | grep -E '^[0-9]+$' | sort -un || true)
-  [ -n "$owned_pids" ] || return 0
+  if [ -z "$owned_pids" ]; then
+    [ "${LIVE_SYNC_DESCENDANT_PROOF_CLOSED:-0}" = 1 ] && return 0
+    live_sync_refuse_lingering_processes "detached task-owned writer absence cannot be proven"
+    return 1
+  fi
   live_sync_reap_endpoint_pids "$owned_pids" root || return 1
   if ! task_pids_under_roots "$LIVE_SYNC_ROOT"; then
     live_sync_refuse_lingering_processes "lsof failed"
     return 1
   fi
-  [ -z "$TASK_PIDS" ] && return 0
+  if [ -z "$TASK_PIDS" ]; then
+    [ "${LIVE_SYNC_DESCENDANT_PROOF_CLOSED:-0}" = 1 ] && return 0
+    live_sync_refuse_lingering_processes "detached task-owned writer absence cannot be proven"
+    return 1
+  fi
   live_sync_refuse_lingering_processes "process(es) remain under live root"
 }
 
