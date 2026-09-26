@@ -1369,10 +1369,14 @@ spawn_abort_cleanup() {
       status=1
     fi
   fi
-  if [ "$SPAWN_LIVE_SYNC_LOCK_ACQUIRED" = 1 ] && [ "$RELAUNCH" -eq 0 ] && [ "$SPAWN_LIVE_SYNC_LOCK_PUBLISHED" != 1 ]; then
+  if [ "$SPAWN_LIVE_SYNC_LOCK_ACQUIRED" = 1 ] &&
+    { [ "$SPAWN_LAUNCH_SENT" = 0 ] || [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; } &&
+    [ "$RELAUNCH" -eq 0 ] && [ "$SPAWN_LIVE_SYNC_LOCK_PUBLISHED" != 1 ]; then
     SPAWN_LIVE_SYNC_LOCK_ACQUIRED=0
     fm_live_sync_release_task "$STATE" "$ID" || true
-  elif [ "$SPAWN_LIVE_SYNC_LOCK_ACQUIRED" = 1 ] && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+  elif [ "$SPAWN_LIVE_SYNC_LOCK_ACQUIRED" = 1 ] &&
+    { [ "$SPAWN_LAUNCH_SENT" = 0 ] || [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; } &&
+    [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
     SPAWN_LIVE_SYNC_LOCK_ACQUIRED=0
     fm_live_sync_release_task "$STATE" "$ID" || true
   fi
@@ -3070,6 +3074,30 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] 
   fi
   SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=1
 fi
+LIVE_SYNC_POLICY_TOKEN=
+LIVE_SYNC_POLICY_ABS=
+if [ "$KIND" = ship ] && [ "$MODE" = live-sync ]; then
+  if [ "$RELAUNCH" -eq 1 ]; then
+    LIVE_SYNC_POLICY_ABS=$(fm_meta_get "$RELAUNCH_META" live_sync_policy)
+    [ -n "$LIVE_SYNC_POLICY_ABS" ] || {
+      echo "error: task $ID has no recorded live-sync protection policy; refusing to relaunch" >&2
+      exit 1
+    }
+    LIVE_SYNC_POLICY_ABS=$(fm_live_sync_canonical_policy "$PROJ_ABS" "$LIVE_SYNC_POLICY_ABS") || {
+      echo "error: recorded live-sync policy for $ID is not a readable regular file: $(fm_meta_get "$RELAUNCH_META" live_sync_policy)" >&2
+      exit 1
+    }
+  else
+    LIVE_SYNC_POLICY_TOKEN=$(fm_live_sync_project_policy_token "$FM_ROOT" "$PROJ_NAME") || {
+      echo "error: $ID cannot launch: live-sync project $PROJ_NAME has no explicit protection policy token; correct data/projects.md" >&2
+      exit 1
+    }
+    LIVE_SYNC_POLICY_ABS=$(fm_live_sync_canonical_policy "$PROJ_ABS" "$LIVE_SYNC_POLICY_TOKEN") || {
+      echo "error: live-sync policy for $PROJ_NAME is not a readable regular file: $LIVE_SYNC_POLICY_TOKEN" >&2
+      exit 1
+    }
+  fi
+fi
 [ -f "$BRIEF" ] || {
   echo "error: task $ID has no brief at inaccessible data path $BRIEF" >&2
   exit 1
@@ -3199,7 +3227,21 @@ if [ "$KIND" = ship ]; then
       echo "error: live-sync brief for $ID records no Live sync write scopes list; re-scaffold with --live-scope" >&2
       exit 1
     }
-    CLI_LIVE_SCOPES=$(printf '%s\n' "${LIVE_SCOPES[@]}")
+    BRIEF_LIVE_SCOPE_ARGS=()
+    while IFS= read -r live_scope || [ -n "$live_scope" ]; do
+      [ -n "$live_scope" ] || continue
+      BRIEF_LIVE_SCOPE_ARGS+=("$live_scope")
+    done <<< "$BRIEF_LIVE_SCOPES"
+    if ! fm_live_sync_validate_scopes "$PROJ_ABS" "$LIVE_SYNC_POLICY_ABS" "${BRIEF_LIVE_SCOPE_ARGS[@]}"; then
+      echo "error: live-sync brief for $ID records invalid write scopes: $FM_LIVE_SYNC_ERROR" >&2
+      exit 1
+    fi
+    BRIEF_LIVE_SCOPES=$(printf '%s\n' "${FM_LIVE_SYNC_SCOPE_RELS[@]}")
+    if ! fm_live_sync_validate_scopes "$PROJ_ABS" "$LIVE_SYNC_POLICY_ABS" "${LIVE_SCOPES[@]}"; then
+      echo "error: live-sync --live-scope values for $ID are invalid: $FM_LIVE_SYNC_ERROR" >&2
+      exit 1
+    fi
+    CLI_LIVE_SCOPES=$(printf '%s\n' "${FM_LIVE_SYNC_SCOPE_RELS[@]}")
     [ "$BRIEF_LIVE_SCOPES" = "$CLI_LIVE_SCOPES" ] || {
       echo "error: live-sync scope mismatch for $ID: the brief scopes differ from --live-scope flags; re-scaffold or pass the matching scope list" >&2
       exit 1
@@ -3251,29 +3293,7 @@ if [ "$KIND" = ship ]; then
   fi
 fi
 
-LIVE_SYNC_POLICY_TOKEN=
-LIVE_SYNC_POLICY_ABS=
 if [ "$KIND" = ship ] && [ "$MODE" = live-sync ]; then
-  if [ "$RELAUNCH" -eq 1 ]; then
-    LIVE_SYNC_POLICY_ABS=$(fm_meta_get "$RELAUNCH_META" live_sync_policy)
-    [ -n "$LIVE_SYNC_POLICY_ABS" ] || {
-      echo "error: task $ID has no recorded live-sync protection policy; refusing to relaunch" >&2
-      exit 1
-    }
-    LIVE_SYNC_POLICY_ABS=$(fm_live_sync_canonical_policy "$PROJ_ABS" "$LIVE_SYNC_POLICY_ABS") || {
-      echo "error: recorded live-sync policy for $ID is not a readable regular file: $(fm_meta_get "$RELAUNCH_META" live_sync_policy)" >&2
-      exit 1
-    }
-  else
-    LIVE_SYNC_POLICY_TOKEN=$(fm_live_sync_project_policy_token "$FM_ROOT" "$PROJ_NAME") || {
-      echo "error: $ID cannot launch: live-sync project $PROJ_NAME has no explicit protection policy token; correct data/projects.md" >&2
-      exit 1
-    }
-    LIVE_SYNC_POLICY_ABS=$(fm_live_sync_canonical_policy "$PROJ_ABS" "$LIVE_SYNC_POLICY_TOKEN") || {
-      echo "error: live-sync policy for $PROJ_NAME is not a readable regular file: $LIVE_SYNC_POLICY_TOKEN" >&2
-      exit 1
-    }
-  fi
   if ! fm_live_sync_acquire_task "$STATE" "$ID" "$PROJ_NAME" "$PROJ_ABS" "$LIVE_SYNC_POLICY_ABS" "${LIVE_SCOPES[@]}"; then
     echo "error: live-sync scope lock refused for $ID: $FM_LIVE_SYNC_ERROR" >&2
     exit 1
