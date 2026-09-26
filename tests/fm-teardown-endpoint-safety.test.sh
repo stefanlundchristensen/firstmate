@@ -608,6 +608,10 @@ test_sole_slot_record_still_tears_down() {
   kill -0 "$worker" 2>/dev/null || fail "uncontested teardown killed a worker in a different slot"
   grep -Fq "treehouse <return>" "$dir/runtime.log" \
     || fail "uncontested teardown did not return its own pool slot: $(cat "$dir/runtime.log")"
+  grep -Fq "treehouse <return> <--force> <$dir/pool/1/project>" "$dir/runtime.log" \
+    || fail "uncontested teardown did not pass Treehouse's recorded slot path: $(cat "$dir/runtime.log")"
+  grep -Fq "treehouse <return> <--force> <$dir/worktree>" "$dir/runtime.log" \
+    && fail "uncontested teardown passed the metadata alias instead of Treehouse's recorded path: $(cat "$dir/runtime.log")"
   kill "$worker" 2>/dev/null || true
   wait "$worker" 2>/dev/null || true
   pass "fm-teardown: a task that solely holds its slot still returns it"
@@ -955,6 +959,34 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   [ "$rc" -eq 0 ] || fail "teardown of a clean ship task whose slot was reassigned failed: $(cat "$dir/stderr")"
   kill -0 "$worker" 2>/dev/null || fail "teardown killed the worker holding the clean reassigned pool slot"
   assert_reassigned_slot_left_alone "$dir" "$id" "$other" "clean reassigned slot without --force"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+
+  # The next holder can also have published metadata by the time a stale record
+  # is cleaned up. The valid slot claim still proves the stale record no longer
+  # owns the slot, so cleanup must retire only the stale record and leave the
+  # current holder's metadata, claim, worker, and checkout untouched.
+  dir=$(make_case slot-reassigned-with-record)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$other" "$dir/other-home"
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "teardown of a stale record with a visible reassigned owner failed: $(cat "$dir/stderr")"
+  kill -0 "$worker" 2>/dev/null || fail "teardown killed the visible owner of the reassigned pool slot"
+  assert_present "$dir/home/state/$other.meta" "teardown removed the visible reassigned owner record"
+  assert_present "$dir/worktree/sentinel" "teardown reset the visible owner's pool slot"
+  assert_reassigned_slot_left_alone "$dir" "$id" "$other" "reassigned slot with visible owner record"
   kill "$worker" 2>/dev/null || true
   wait "$worker" 2>/dev/null || true
 

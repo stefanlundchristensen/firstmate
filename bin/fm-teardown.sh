@@ -1687,6 +1687,91 @@ canonical_existing_dir() {
   ( cd "$target" && pwd -P )
 }
 
+teardown_abs_git_common_dir() {  # <git-worktree>
+  local target=$1 common
+  common=$(git -C "$target" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  [ -n "$common" ] || return 1
+  ( cd "$common" && pwd -P )
+}
+
+teardown_treehouse_return_path() {  # <recorded-dir> <project-dir> <label>
+  local dir=$1 project=$2 label=$3 slot pool state slot_name paths count path
+  local state_pool state_file dir_common path_common
+  if ! fm_treehouse_pool_slot "$project" "$dir"; then
+    printf '%s\n' "$dir"
+    return 0
+  fi
+  slot=$(canonical_existing_dir "$dir") || {
+    echo "REFUSED: cannot canonicalize $label Treehouse slot ${dir:-<missing>}; nothing was changed" >&2
+    return 1
+  }
+  pool=$(dirname "$(dirname "$slot")")
+  state="$pool/treehouse-state.json"
+  [ -f "$state" ] && [ ! -L "$state" ] || {
+    echo "REFUSED: cannot read Treehouse state for $label slot $slot; nothing was changed" >&2
+    return 1
+  }
+  slot_name=$(basename "$(dirname "$slot")")
+  paths=$(perl -MJSON::PP -e '
+use strict;
+use warnings;
+my ($file, $name) = @ARGV;
+open my $fh, "<", $file or exit 2;
+local $/;
+my $data = eval { JSON::PP->new->decode(<$fh>) };
+exit 2 if $@ || ref($data) ne "HASH" || ref($data->{worktrees}) ne "ARRAY";
+for my $entry (@{$data->{worktrees}}) {
+  next unless ref($entry) eq "HASH";
+  next unless defined $entry->{name} && ! ref($entry->{name}) && "$entry->{name}" eq $name;
+  next unless defined $entry->{path} && ! ref($entry->{path});
+  print $entry->{path}, "\n";
+}
+' "$state" "$slot_name") || {
+    echo "REFUSED: cannot parse Treehouse state $state for $label slot $slot; nothing was changed" >&2
+    return 1
+  }
+  count=$(printf '%s\n' "$paths" | awk 'length($0) { c++ } END { print c + 0 }')
+  [ "$count" = 1 ] || {
+    echo "REFUSED: Treehouse state $state has $count paths for $label slot $slot_name; nothing was changed" >&2
+    return 1
+  }
+  path=$paths
+  case "$path" in
+    /*) ;;
+    *)
+      echo "REFUSED: Treehouse state $state records non-absolute path for $label slot $slot_name; nothing was changed" >&2
+      return 1
+      ;;
+  esac
+  [ -d "$path" ] || {
+    echo "REFUSED: Treehouse state $state records missing path $path for $label slot $slot_name; nothing was changed" >&2
+    return 1
+  }
+  state_pool=$(dirname "$(dirname "$path")")
+  state_file="$state_pool/treehouse-state.json"
+  [ -f "$state_file" ] && [ ! -L "$state_file" ] && [ "$state_file" -ef "$state" ] || {
+    echo "REFUSED: Treehouse state path $path for $label slot $slot_name does not belong to the verified pool; nothing was changed" >&2
+    return 1
+  }
+  [ "$(basename "$(dirname "$path")")" = "$slot_name" ] || {
+    echo "REFUSED: Treehouse state path $path does not name verified $label slot $slot_name; nothing was changed" >&2
+    return 1
+  }
+  dir_common=$(teardown_abs_git_common_dir "$dir") || {
+    echo "REFUSED: cannot resolve git identity for recorded $label slot $dir; nothing was changed" >&2
+    return 1
+  }
+  path_common=$(teardown_abs_git_common_dir "$path") || {
+    echo "REFUSED: cannot resolve git identity for Treehouse state path $path; nothing was changed" >&2
+    return 1
+  }
+  [ "$path_common" = "$dir_common" ] || {
+    echo "REFUSED: Treehouse state path $path does not match recorded $label slot $dir; nothing was changed" >&2
+    return 1
+  }
+  printf '%s\n' "$path"
+}
+
 retry_wait_secs_is_valid() {
   [[ "$1" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]
 }
@@ -1770,11 +1855,16 @@ cleanup_stale_lock_for_safety_check() {
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
-  local out lock attempt=0 max_retries lock_desc
+  local out lock attempt=0 max_retries lock_desc return_dir
+
+  return_dir=$(teardown_treehouse_return_path "$dir" "$cd_dir" "$label") || return 1
+  if [ "$return_dir" != "$dir" ]; then
+    echo "teardown: using Treehouse state path $return_dir for $label return (recorded path $dir)" >&2
+  fi
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
-  if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+  if out=$( ( cd "$cd_dir" && treehouse return --force "$return_dir" ) 2>&1 ); then
     [ -n "$out" ] && printf '%s\n' "$out"
     return 0
   fi
@@ -1799,7 +1889,7 @@ teardown_treehouse_return() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+    if out=$( ( cd "$cd_dir" && treehouse return --force "$return_dir" ) 2>&1 ); then
       [ -n "$out" ] && printf '%s\n' "$out"
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
       return 0
@@ -1826,7 +1916,7 @@ teardown_treehouse_return() {
           return 1
         fi
       fi
-      if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+      if out=$( ( cd "$cd_dir" && treehouse return --force "$return_dir" ) 2>&1 ); then
         [ -n "$out" ] && printf '%s\n' "$out"
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0
@@ -2366,6 +2456,7 @@ require_exclusive_worktree_slot_record() {
 
 require_exclusive_task_worktree_slot() {
   local slot
+  teardown_owns_worktree || return 0
   slot=$(teardown_live_slot_path) || return 0
   require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$slot"
 }
@@ -2956,13 +3047,14 @@ preflight_descendant_treehouse_slots() {
       continue
     fi
     fm_backend_validate_task_endpoint "$meta" "$task_id" || return 1
-    require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1
     owner_rc=0
     require_owned_worktree_slot_record "$task_id" "$worktree" || owner_rc=$?
     case "$owner_rc" in
-      0|"$TEARDOWN_SLOT_REASSIGNED_RC") ;;
+      0) ;;
+      "$TEARDOWN_SLOT_REASSIGNED_RC") continue ;;
       *) return 1 ;;
     esac
+    require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1
   done
 }
 
@@ -3305,8 +3397,8 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
-require_exclusive_task_worktree_slot || exit 1
 require_owned_task_worktree_slot || exit 1
+require_exclusive_task_worktree_slot || exit 1
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
