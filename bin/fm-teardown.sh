@@ -2220,14 +2220,35 @@ task_pids_in_pgid() {  # <pgid>
 }
 
 live_sync_capture_endpoint_process_group() {
-  local leader pgid own_pgid
+  local leader pgid own_pgid session pane info
   LIVE_SYNC_ENDPOINT_PGID=
-  if [ "$BACKEND" != tmux ] || [ -z "${T:-}" ]; then
-    return 0
-  fi
-  leader=$(tmux display-message -p -t "$T" '#{pane_pid}' 2>/dev/null) || leader=""
-  case "$leader" in ''|*[!0-9]*) return 0 ;; esac
-  pgid=$(task_pid_pgid "$leader") || return 0
+  case "$BACKEND" in
+    tmux)
+      [ -n "${T:-}" ] || return 0
+      leader=$(tmux display-message -p -t "$T" '#{pane_pid}' 2>/dev/null) || leader=""
+      case "$leader" in ''|*[!0-9]*) return 0 ;; esac
+      pgid=$(task_pid_pgid "$leader") || return 0
+      ;;
+    herdr)
+      [ -n "${T:-}" ] || return 0
+      fm_backend_source herdr || return 0
+      fm_backend_herdr_parse_target "$T" || return 0
+      session=$FM_BACKEND_HERDR_SESSION
+      pane=$FM_BACKEND_HERDR_PANE
+      info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 0
+      printf '%s' "$info" | jq -e --arg pane "$pane" '
+        .result.type == "pane_process_info"
+        and .result.process_info.pane_id == $pane
+      ' >/dev/null 2>&1 || return 0
+      pgid=$(printf '%s' "$info" | jq -er '
+        .result.process_info.foreground_process_group_id
+        | select(type == "number" and . > 1) | floor
+      ' 2>/dev/null) || return 0
+      ;;
+    *)
+      return 0
+      ;;
+  esac
   own_pgid=$(task_pid_pgid "$$") || own_pgid=
   [ -z "$own_pgid" ] || [ "$pgid" != "$own_pgid" ] || return 0
   LIVE_SYNC_ENDPOINT_PGID=$pgid

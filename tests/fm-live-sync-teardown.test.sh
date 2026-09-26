@@ -54,6 +54,54 @@ EOF
   printf '%s\n' "$case_dir"
 }
 
+configure_herdr_case() {  # <case-dir> <pgid>
+  local case_dir=$1 pgid=$2 vault tasktmp policy
+  vault="$case_dir/vault"
+  tasktmp="$case_dir/tasktmp"
+  policy="$vault/.firstmate-live-sync-policy"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:w1:p1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$vault" \
+    "project=vault" \
+    "kind=ship" \
+    "mode=live-sync" \
+    "tasktmp=$tasktmp" \
+    "backend=herdr" \
+    "herdr_session=firstmate" \
+    "herdr_workspace_id=w1" \
+    "herdr_tab_id=t1" \
+    "herdr_pane_id=w1:p1" \
+    "spawn_gen=live-sync-teardown-test" \
+    "live_sync_root=$vault" \
+    "live_sync_policy=$policy" \
+    $'live_sync_scope=file\tNote.md'
+  cat > "$case_dir/fakebin/herdr" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then
+  printf '%s\n' '{"client":{"protocol":22},"server":{"running":true,"compatible":true,"protocol":22}}'
+  exit 0
+fi
+if [ "\${1:-}" = session ] && [ "\${2:-}" = list ]; then
+  printf '%s\n' '{"sessions":[{"name":"firstmate","running":true,"socket_path":"$case_dir/herdr.sock"}]}'
+  exit 0
+fi
+if [ "\${1:-}" = pane ] && [ "\${2:-}" = process-info ]; then
+  printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p1","foreground_process_group_id":$pgid,"shell_pid":$pgid,"foreground_processes":[]}}}'
+  exit 0
+fi
+if [ "\${1:-}" = pane ] && [ "\${2:-}" = get ]; then
+  printf '%s\n' '{"error":{"code":"pane_not_found"}}'
+  exit 1
+fi
+if [ "\${1:-}" = pane ] && [ "\${2:-}" = close ]; then
+  exit 0
+fi
+printf '%s\n' '{"result":{}}'
+EOF
+  chmod +x "$case_dir/fakebin/herdr"
+}
+
 run_live_teardown() {  # <case-dir>
   local case_dir=$1
   FM_ROOT_OVERRIDE="$ROOT" \
@@ -185,6 +233,26 @@ EOF
   pass "live-sync teardown stops owned endpoint writers outside the vault cwd before releasing locks"
 }
 
+test_herdr_endpoint_writer_outside_vault_is_stopped_before_lock_release() {
+  local case_dir vault pid rc=0
+  case_dir=$(make_live_case herdr-owned 0)
+  vault="$case_dir/vault"
+  pid=$(start_owned_group_writer_outside_vault "$vault")
+  wait_for_pid "$pid" || { kill "$pid" 2>/dev/null || true; fail "herdr outside-vault writer never started"; }
+  configure_herdr_case "$case_dir" "$pid"
+  run_live_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -eq 0 ] || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "herdr outside-vault writer teardown failed"; }
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "herdr outside-vault writer survived teardown"
+  fi
+  assert_absent "$case_dir/state/task-x1.meta" "herdr outside-vault writer left task metadata after cleanup"
+  assert_absent "$case_dir/state/live-sync-locks/task-x1.lock" "herdr outside-vault writer left live-sync lock after cleanup"
+  assert_grep "reaping leaked live-sync process" "$case_dir/stderr" "herdr outside-vault writer cleanup did not report process reaping"
+  pass "live-sync teardown stops Herdr-owned endpoint writers before releasing locks"
+}
+
 test_missing_endpoint_ownership_retains_lock_without_killing_writer() {
   local case_dir vault pid rc=0
   case_dir=$(make_live_case missing-endpoint 0)
@@ -208,4 +276,5 @@ test_missing_endpoint_ownership_retains_lock_without_killing_writer() {
 test_uncertain_live_root_process_retains_lock
 test_owned_live_root_process_is_stopped_before_lock_release
 test_owned_endpoint_writer_outside_vault_is_stopped_before_lock_release
+test_herdr_endpoint_writer_outside_vault_is_stopped_before_lock_release
 test_missing_endpoint_ownership_retains_lock_without_killing_writer
