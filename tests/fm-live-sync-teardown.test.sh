@@ -103,13 +103,19 @@ EOF
 }
 
 run_live_teardown() {  # <case-dir>
-  local case_dir=$1
+  local case_dir=$1 proc_root
+  if [ -n "${FM_LIVE_SYNC_PROC_ROOT_OVERRIDE:-}" ]; then
+    proc_root=$FM_LIVE_SYNC_PROC_ROOT_OVERRIDE
+  else
+    proc_root=$case_dir/proc
+    mkdir -p "$proc_root"
+  fi
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_HOME="$case_dir/home" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
-  FM_LIVE_SYNC_PROC_ROOT_OVERRIDE="${FM_LIVE_SYNC_PROC_ROOT_OVERRIDE:-}" \
+  FM_LIVE_SYNC_PROC_ROOT_OVERRIDE="$proc_root" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1
 }
@@ -396,6 +402,31 @@ EOF
   pass "live-sync teardown retains locks for daemonized detached writers"
 }
 
+test_missing_env_ownership_probe_retains_lock() {
+  local case_dir vault pid rc=0
+  case_dir=$(make_live_case missing-env-proof 0)
+  vault="$case_dir/vault"
+  pid=$(start_owned_group_writer_outside_vault "$vault")
+  wait_for_pid "$pid" || { kill "$pid" 2>/dev/null || true; fail "missing-env-proof endpoint writer never started"; }
+  rm -f "$case_dir/fakebin/tmux"
+  cat > "$case_dir/fakebin/tmux" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}" in
+  display-message) printf '%s\n' '$pid' ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$case_dir/fakebin/tmux"
+  FM_LIVE_SYNC_PROC_ROOT_OVERRIDE="$case_dir/no-proc" run_live_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "missing environment ownership proof should retain live-sync lock"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  assert_present "$case_dir/state/task-x1.meta" "missing environment proof removed task metadata"
+  assert_present "$case_dir/state/live-sync-locks/task-x1.lock" "missing environment proof released live-sync lock"
+  assert_grep "environment ownership cannot be inspected" "$case_dir/stderr" "missing environment proof refusal did not name unavailable proof"
+  pass "live-sync teardown retains locks when environment ownership cannot be inspected"
+}
+
 test_missing_live_root_retains_lock_after_endpoint_reap() {
   local case_dir vault pid rc=0
   case_dir=$(make_live_case missing-root 0)
@@ -468,6 +499,7 @@ test_owned_endpoint_writer_outside_vault_is_stopped_before_lock_release
 test_detached_endpoint_descendant_writer_is_stopped_before_lock_release
 test_trap_spawned_detached_writer_retains_lock
 test_daemonized_writer_retains_lock_without_current_descendants
+test_missing_env_ownership_probe_retains_lock
 test_missing_live_root_retains_lock_after_endpoint_reap
 test_herdr_endpoint_writer_outside_vault_is_stopped_before_lock_release
 test_missing_endpoint_ownership_retains_lock_without_killing_writer

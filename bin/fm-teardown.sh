@@ -2403,6 +2403,7 @@ EOF
 
 live_sync_marker_pids() {
   local marker_root=${LIVE_SYNC_ROOT:-} marker_id=${ID:-} proc_root=${FM_LIVE_SYNC_PROC_ROOT_OVERRIDE:-/proc} argv_pids env_pids pid env_file env
+  LIVE_SYNC_ENV_PROOF_AVAILABLE=0
   argv_pids=$(ps -axo pid=,stat=,args= 2>/dev/null | awk -v self="$$" -v id="$marker_id" '
     {
       pid = $1
@@ -2415,6 +2416,7 @@ live_sync_marker_pids() {
     }') || return 1
   env_pids=
   if [ -d "$proc_root" ]; then
+    LIVE_SYNC_ENV_PROOF_AVAILABLE=1
     while IFS= read -r pid; do
       [ -n "$pid" ] || continue
       env_file=$proc_root/$pid/environ
@@ -2430,17 +2432,22 @@ $pid"
 $(ps -axo pid= 2>/dev/null | tr -d ' ')
 EOF
   fi
-  printf '%s\n%s\n' "$argv_pids" "$env_pids" | grep -E '^[0-9]+$' | sort -un
+  LIVE_SYNC_MARKER_PIDS=$(printf '%s\n%s\n' "$argv_pids" "$env_pids" | grep -E '^[0-9]+$' | sort -un || true)
 }
 
 live_sync_require_no_marker_pids() {
   local pids
-  pids=$(live_sync_marker_pids) || {
+  if ! live_sync_marker_pids; then
     live_sync_refuse_lingering_processes "process marker scan failed"
     return 1
-  }
+  fi
+  pids=$LIVE_SYNC_MARKER_PIDS
   if [ -n "$pids" ]; then
     live_sync_refuse_lingering_processes "possible detached task-owned writer process(es): $(printf '%s' "$pids" | tr '\n' ' ')"
+    return 1
+  fi
+  if [ "${LIVE_SYNC_ENV_PROOF_AVAILABLE:-0}" != 1 ]; then
+    live_sync_refuse_lingering_processes "process environment ownership cannot be inspected"
     return 1
   fi
 }
