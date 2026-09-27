@@ -139,6 +139,28 @@ fill_brief_subsections() {  # <file>
   printf '%s\n' "$content" > "$file"
 }
 
+write_fake_tmux() {  # <path>
+  cat > "$1" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  has-session|new-session|set-window-option|send-keys) exit 0 ;;
+  list-windows) exit 0 ;;
+  new-window) printf '%%1\n'; exit 0 ;;
+  display-message)
+    case "$*" in
+      *'#S'*) printf 'firstmate\n' ;;
+      *'#{pane_id}'*) printf '%%pane\n' ;;
+      *'#{pane_current_path}'*) printf '%s\n' "$PWD" ;;
+      *) printf 'firstmate\n' ;;
+    esac
+    exit 0
+    ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$1"
+}
+
 test_brief_and_spawn_live_sync_scope_contract() {
   local root home fakebin out rc brief lockfile
   root=$(make_vault spawn)
@@ -183,7 +205,54 @@ EOF
   pass "fm-brief/fm-spawn: live-sync records scopes, refuses branch/yolo drift, and rolls back failed fresh locks"
 }
 
+test_live_sync_backlog_failure_preserves_record_and_lock() {
+  local root home fakebin real_tasks out rc brief
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped: tasks-axi is not installed, so the live-sync backlog failure regression cannot run"
+    return
+  }
+  root=$(make_vault backlog-failure)
+  home="$TMP_ROOT/backlog-failure/home"
+  fakebin="$TMP_ROOT/backlog-failure/bin"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$fakebin"
+  cat > "$home/data/projects.md" <<EOF
+- vault [live-sync path=$root policy=.firstmate-live-sync-policy] - synthetic vault
+EOF
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$home/data/backlog.md"
+  tasks-axi add live-c 'live sync regression task' --kind ship --file "$home/data/backlog.md" >/dev/null || {
+    pass "skipped: tasks-axi could not seed the live-sync backlog regression"
+    return
+  }
+  write_fake_tmux "$fakebin/tmux"
+  real_tasks=$(command -v tasks-axi)
+  cat > "$fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = start ]; then
+  echo 'error: synthetic start failure' >&2
+  exit 1
+fi
+exec "$real_tasks" "\$@"
+SH
+  chmod +x "$fakebin/tasks-axi"
+
+  FM_HOME="$home" "$BRIEF" live-c vault --mode live-sync --live-scope Notes/a.md >/dev/null
+  brief="$home/data/live-c/brief.md"
+  fill_brief_subsections "$brief"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux PATH="$fakebin:$PATH" \
+      "$SPAWN" live-c vault "bash -lc true" --mode live-sync --yolo off --live-scope Notes/a.md 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "spawn should fail when the final backlog start fails"
+  assert_contains "$out" "task record and scope lock were preserved" "live-sync backlog failure did not report supervised preservation"
+  assert_present "$home/state/live-c.meta" "live-sync backlog failure removed the task record"
+  assert_present "$home/state/live-sync-locks/live-c.lock" "live-sync backlog failure released the scope lock"
+
+  pass "fm-spawn: live-sync post-launch backlog failures keep teardown-owned state"
+}
+
 test_policy_validation_and_canonicalization
 test_scope_locks_exclude_only_overlaps
 test_project_mode_live_sync_registry
 test_brief_and_spawn_live_sync_scope_contract
+test_live_sync_backlog_failure_preserves_record_and_lock
