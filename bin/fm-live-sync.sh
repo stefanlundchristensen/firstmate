@@ -10,8 +10,9 @@
 # `check` validates path canonicalization, explicit policy classification, and
 # protected-path exclusion, but it does not acquire a durable lock.
 #
-# This tool is not a sandbox. It mechanically validates and serializes declared
-# write scopes; a same-user worker must still keep its actual writes inside them.
+# This tool is not a sandbox. It mechanically validates declared write scopes;
+# dispatch owns durable overlap serialization, and a same-user worker must still
+# keep its actual writes inside the declared scopes.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
