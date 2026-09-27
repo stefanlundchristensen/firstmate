@@ -45,7 +45,7 @@ shift
 
 scopes=()
 parse_scopes() {
-  local want_scope= arg
+  local want_scope='' arg
   scopes=()
   for arg in "$@"; do
     if [ -n "$want_scope" ]; then

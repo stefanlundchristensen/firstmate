@@ -88,7 +88,7 @@ fm_live_sync_path_is_ancestor_of() {  # <ancestor> <path>
 }
 
 fm_live_sync_join_rel_parts() {  # <part>...
-  local out= part
+  local out='' part
   for part in "$@"; do
     [ -n "$part" ] || continue
     if [ -z "$out" ]; then
@@ -167,7 +167,7 @@ fm_live_sync_canonical_scope() {  # <root-abs> <scope>
   esac
   if [ -e "$path" ] || [ -L "$path" ]; then
     abs=$(fm_live_sync_abs_existing "$path") || return 1
-    if [ -d "$path" ]; then kind=dir; else kind=file; fi
+    if [ -d "$path" ]; then kind='dir'; else kind='file'; fi
   else
     parent=${path%/*}
     base=${path##*/}
@@ -175,7 +175,7 @@ fm_live_sync_canonical_scope() {  # <root-abs> <scope>
     [ -n "$base" ] && [ "$base" != . ] && [ "$base" != .. ] || return 1
     parent_abs=$(fm_live_sync_abs_existing "$parent") || return 1
     abs="$parent_abs/$base"
-    case "$scope" in */) kind=dir ;; *) kind=file ;; esac
+    case "$scope" in */) kind='dir' ;; *) kind='file' ;; esac
   fi
   if [ "$abs" != "$root" ] && ! fm_live_sync_path_is_ancestor_of "$root" "$abs"; then
     return 1
@@ -289,6 +289,7 @@ fm_live_sync_scope_allowed() {  # <kind> <rel>
     allow_kind=${FM_LIVE_SYNC_ALLOW_KINDS[$i]}
     case "$allow_kind" in
       pattern)
+        # shellcheck disable=SC2254 # allow entries with glob metacharacters are intentional patterns.
         case "$rel" in $allow) return 0 ;; esac
         ;;
       dir)
