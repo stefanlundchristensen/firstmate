@@ -485,7 +485,10 @@ fm_live_sync_release_task() {  # <state-dir> <task-id>
   index_lock=$(fm_live_sync_index_lock "$state")
   mkdir -p "$(dirname "$record")" || return 1
   fm_lock_acquire_wait "$index_lock" || return 1
-  rm -f -- "$record"
+  if ! rm -f -- "$record"; then
+    fm_lock_release "$index_lock" || true
+    return 1
+  fi
   fm_lock_release "$index_lock"
 }
 

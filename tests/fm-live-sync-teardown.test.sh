@@ -427,6 +427,33 @@ EOF
   pass "live-sync teardown retains locks when environment ownership cannot be inspected"
 }
 
+test_scope_release_failure_retains_task_record() {
+  local case_dir vault pid rc=0
+  case_dir=$(make_live_case release-failure 0)
+  vault="$case_dir/vault"
+  pid=$(start_owned_group_writer_outside_vault "$vault")
+  wait_for_pid "$pid" || { kill "$pid" 2>/dev/null || true; fail "release-failure endpoint writer never started"; }
+  rm -f "$case_dir/fakebin/tmux"
+  cat > "$case_dir/fakebin/tmux" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}" in
+  display-message) printf '%s\n' '$pid' ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$case_dir/fakebin/tmux"
+  chmod 500 "$case_dir/state/live-sync-locks" || { kill "$pid" 2>/dev/null || true; fail "could not make live-sync lock release fail"; }
+  run_live_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  chmod 700 "$case_dir/state/live-sync-locks" 2>/dev/null || true
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 1 "$rc" "live-sync lock release failure should refuse teardown"
+  assert_present "$case_dir/state/task-x1.meta" "release failure removed task metadata"
+  assert_present "$case_dir/state/live-sync-locks/task-x1.lock" "release failure removed live-sync lock"
+  assert_grep "retaining its task record" "$case_dir/stderr" "release failure did not report retained metadata"
+  pass "live-sync teardown retains task records when scope release fails"
+}
+
 test_ps_environment_probe_releases_lock_without_procfs() {
   local case_dir vault pid rc=0
   case_dir=$(make_live_case ps-env-proof 0)
@@ -527,6 +554,7 @@ test_detached_endpoint_descendant_writer_is_stopped_before_lock_release
 test_trap_spawned_detached_writer_retains_lock
 test_daemonized_writer_retains_lock_without_current_descendants
 test_missing_env_ownership_probe_retains_lock
+test_scope_release_failure_retains_task_record
 test_ps_environment_probe_releases_lock_without_procfs
 test_missing_live_root_retains_lock_after_endpoint_reap
 test_herdr_endpoint_writer_outside_vault_is_stopped_before_lock_release

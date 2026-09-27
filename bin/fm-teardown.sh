@@ -4254,6 +4254,14 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
 # read-only by its installer.
 chmod u+w "$STATE/$ID.git-hooks" 2>/dev/null || true
 rm -rf "$STATE/$ID.inbox" "$STATE/$ID.git-hooks"
+if [ "$KIND" != secondmate ] && [ "$MODE" = live-sync ]; then
+  if ! fm_live_sync_release_task "$STATE" "$ID"; then
+    fm_lock_release "$META_LOCK"
+    META_LOCK_HELD=0
+    echo "error: $ID's endpoint and live-root writers are cleaned up, but its live-sync scope lock could not be released; retaining its task record so teardown can retry" >&2
+    exit 1
+  fi
+fi
 # The record is gone, so the backlog must not still show this task in flight
 # when teardown reports success. Still under this task's meta lock, so a steer
 # racing the same id stays serialized exactly as it was before. A captain-held
@@ -4282,14 +4290,6 @@ else
     fm_lock_release "$META_LOCK"
     META_LOCK_HELD=0
     echo "error: $ID's endpoint and local copy are cleaned up, but its task record could not be removed ($FM_BACKLOG_TRANSITION_ERROR)" >&2
-    exit 1
-  fi
-fi
-if [ "$KIND" != secondmate ] && [ "$MODE" = live-sync ]; then
-  if ! fm_live_sync_release_task "$STATE" "$ID"; then
-    fm_lock_release "$META_LOCK"
-    META_LOCK_HELD=0
-    echo "error: $ID's task record was removed, but its live-sync scope lock could not be released; run bin/fm-live-sync.sh release $ID after inspecting state/live-sync-locks/$ID.lock" >&2
     exit 1
   fi
 fi

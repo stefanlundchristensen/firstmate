@@ -135,7 +135,16 @@ EOF
   assert_contains "$out" "unknown command acquire" "manual acquire refusal did not name the removed command"
   assert_absent "$home/state/live-sync-locks/live-manual.lock" "manual acquire created an unsupervised live-sync lock"
 
-  pass "fm-project-mode/fm-live-sync: registry queries, invalid token refusals, and no manual acquire"
+  mkdir -p "$home/state"
+  fm_live_sync_acquire_task "$home/state" live-manual vault "$root" "$root/.firstmate-live-sync-policy" Notes/a.md \
+    || fail "setup lock for manual release refusal failed"
+  out=$(FM_HOME="$home" "$LIVE_SYNC" release live-manual 2>&1)
+  rc=$?
+  expect_code 2 "$rc" "manual live-sync release refusal"
+  assert_contains "$out" "unknown command release" "manual release refusal did not name the removed command"
+  assert_present "$home/state/live-sync-locks/live-manual.lock" "manual release removed a supervised live-sync lock"
+
+  pass "fm-project-mode/fm-live-sync: registry queries, invalid token refusals, and no manual lock mutation"
 }
 
 fill_brief_subsections() {  # <file>

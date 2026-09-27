@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
-# Validate live-sync project scopes and release supervised scope locks.
+# Validate live-sync project scopes.
 # Usage:
 #   fm-live-sync.sh info <project>
 #   fm-live-sync.sh check <project> --scope <relative-path> [--scope <relative-path>...]
-#   fm-live-sync.sh release <task-id>
 #
 # stdout is concise agent-readable text; errors are printed to stdout and return
 # non-zero so a caller can relay the refusal directly.
 # `info` prints the registered root and policy after canonicalization.
 # `check` validates path canonicalization, explicit policy classification, and
 # protected-path exclusion, but it does not acquire a durable lock.
-# `release` removes only that task's lock record and is idempotent.
 #
 # This tool is not a sandbox. It mechanically validates and serializes declared
 # write scopes; a same-user worker must still keep its actual writes inside them.
@@ -111,14 +109,6 @@ case "$command" in
     fi
     printf 'ok: live-sync scopes are allowed for %s\n' "$project"
     print_scopes
-    ;;
-  release)
-    [ "$#" -eq 1 ] || { printf 'error: release requires exactly one task id\n'; exit 2; }
-    fm_live_sync_release_task "$STATE" "$1" || {
-      printf 'error: could not release live-sync lock for %s\n' "$1"
-      exit 1
-    }
-    printf 'ok: released live-sync lock for %s\n' "$1"
     ;;
   *)
     printf 'error: unknown command %s\n' "$command"
