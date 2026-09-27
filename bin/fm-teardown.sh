@@ -2402,8 +2402,8 @@ EOF
 }
 
 live_sync_marker_pids() {
-  local marker_root=${LIVE_SYNC_ROOT:-} marker_id=${ID:-}
-  ps -axo pid=,stat=,args= 2>/dev/null | awk -v self="$$" -v root="$marker_root" -v id="$marker_id" '
+  local marker_root=${LIVE_SYNC_ROOT:-} marker_id=${ID:-} proc_root=${FM_LIVE_SYNC_PROC_ROOT_OVERRIDE:-/proc} argv_pids env_pids pid env_file env
+  argv_pids=$(ps -axo pid=,stat=,args= 2>/dev/null | awk -v self="$$" -v id="$marker_id" '
     {
       pid = $1
       stat = $2
@@ -2412,7 +2412,25 @@ live_sync_marker_pids() {
       if (pid == self || pid == "" || stat ~ /^Z/) next
       if (index(line, "LIVE_SYNC_ROOT") > 0) print pid
       else if (id != "" && index(line, "FM_TASK_ID=" id) > 0) print pid
-    }' | sort -un
+    }') || return 1
+  env_pids=
+  if [ -d "$proc_root" ]; then
+    while IFS= read -r pid; do
+      [ -n "$pid" ] || continue
+      env_file=$proc_root/$pid/environ
+      [ -r "$env_file" ] || continue
+      env=$(tr '\0' '\n' < "$env_file" 2>/dev/null) || continue
+      if { [ -n "$marker_id" ] && printf '%s\n' "$env" | grep -Fxq "FM_TASK_ID=$marker_id"; } \
+         || { [ -n "$marker_root" ] && printf '%s\n' "$env" | grep -Fqx "LIVE_SYNC_ROOT=$marker_root"; } \
+         || { [ -n "$marker_root" ] && printf '%s\n' "$env" | grep -Fq "=$marker_root"; }; then
+        env_pids="$env_pids
+$pid"
+      fi
+    done <<EOF
+$(ps -axo pid= 2>/dev/null | tr -d ' ')
+EOF
+  fi
+  printf '%s\n%s\n' "$argv_pids" "$env_pids" | grep -E '^[0-9]+$' | sort -un
 }
 
 live_sync_require_no_marker_pids() {

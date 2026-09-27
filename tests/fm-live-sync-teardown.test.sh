@@ -109,6 +109,7 @@ run_live_teardown() {  # <case-dir>
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_LIVE_SYNC_PROC_ROOT_OVERRIDE="${FM_LIVE_SYNC_PROC_ROOT_OVERRIDE:-}" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1
 }
@@ -152,15 +153,15 @@ else:
 }
 
 start_endpoint_with_daemonized_writer() {  # <vault> <writer-pid-file>
-  python3 -c 'import os, sys, time; marker="LIVE_SYNC_ROOT"; os.setsid(); child=os.fork();
+  FM_TASK_ID=task-x1 VAULT="$1" python3 -c 'import os, sys, time; os.setsid(); child=os.fork();
 if child == 0:
     os.setsid(); grandchild=os.fork()
     if grandchild == 0:
-        os.chdir("/tmp"); open(os.path.join(sys.argv[1], "Note.md"), "a").write("daemonized\\n"); time.sleep(300)
+        os.chdir("/tmp"); open(os.path.join(os.environ["VAULT"], "Note.md"), "a").write("daemonized\\n"); time.sleep(300)
     else:
-        open(sys.argv[2], "w").write(str(grandchild)); sys.exit(0)
+        open(sys.argv[1], "w").write(str(grandchild)); sys.exit(0)
 else:
-    os.waitpid(child, 0); time.sleep(300)' "$1" "$2" </dev/null >/dev/null 2>&1 &
+    os.waitpid(child, 0); time.sleep(300)' "$2" </dev/null >/dev/null 2>&1 &
   printf '%s\n' "$!"
 }
 
@@ -359,7 +360,7 @@ EOF
 }
 
 test_daemonized_writer_retains_lock_without_current_descendants() {
-  local case_dir vault pidfile endpoint_pid writer_pid rc=0
+  local case_dir vault pidfile endpoint_pid writer_pid proc_root rc=0
   case_dir=$(make_live_case daemonized-writer 0)
   vault="$case_dir/vault"
   pidfile="$case_dir/daemonized-writer.pid"
@@ -368,6 +369,9 @@ test_daemonized_writer_retains_lock_without_current_descendants() {
   wait_for_file "$pidfile" || { kill "$endpoint_pid" 2>/dev/null || true; fail "daemonized writer pid was not recorded"; }
   writer_pid=$(<"$pidfile")
   wait_for_pid "$writer_pid" || { kill "$endpoint_pid" "$writer_pid" 2>/dev/null || true; fail "daemonized writer never started"; }
+  proc_root="$case_dir/proc"
+  mkdir -p "$proc_root/$writer_pid"
+  printf 'FM_TASK_ID=task-x1\0VAULT=%s\0' "$vault" > "$proc_root/$writer_pid/environ"
   rm -f "$case_dir/fakebin/tmux"
   cat > "$case_dir/fakebin/tmux" <<EOF
 #!/usr/bin/env bash
@@ -377,7 +381,7 @@ case "\${1:-}" in
 esac
 EOF
   chmod +x "$case_dir/fakebin/tmux"
-  run_live_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  FM_LIVE_SYNC_PROC_ROOT_OVERRIDE="$proc_root" run_live_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   expect_code 1 "$rc" "daemonized writer should retain live-sync lock"
   if ! kill -0 "$writer_pid" 2>/dev/null; then
     wait "$writer_pid" 2>/dev/null || true
