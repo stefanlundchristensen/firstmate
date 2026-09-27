@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Validate and maintain live-sync project scope locks.
+# Validate live-sync project scopes and release supervised scope locks.
 # Usage:
 #   fm-live-sync.sh info <project>
 #   fm-live-sync.sh check <project> --scope <relative-path> [--scope <relative-path>...]
-#   fm-live-sync.sh acquire <task-id> <project> --scope <relative-path> [--scope <relative-path>...]
 #   fm-live-sync.sh release <task-id>
 #
 # stdout is concise agent-readable text; errors are printed to stdout and return
@@ -11,8 +10,6 @@
 # `info` prints the registered root and policy after canonicalization.
 # `check` validates path canonicalization, explicit policy classification, and
 # protected-path exclusion, but it does not acquire a durable lock.
-# `acquire` does the same validation and then writes this task's durable scope
-# lock under state/live-sync-locks/ unless an active lock overlaps.
 # `release` removes only that task's lock record and is idempotent.
 #
 # This tool is not a sandbox. It mechanically validates and serializes declared
@@ -113,20 +110,6 @@ case "$command" in
       exit 1
     fi
     printf 'ok: live-sync scopes are allowed for %s\n' "$project"
-    print_scopes
-    ;;
-  acquire)
-    [ "$#" -ge 2 ] || { printf 'error: acquire requires a task id and project\n'; exit 2; }
-    task_id=$1
-    project=$2
-    shift 2
-    parse_scopes "$@" || exit $?
-    load_project "$project" || exit 1
-    if ! fm_live_sync_acquire_task "$STATE" "$task_id" "$project" "$FM_LIVE_SYNC_ROOT" "$FM_LIVE_SYNC_POLICY" "${scopes[@]}" 2>/dev/null; then
-      printf 'error: %s\n' "$FM_LIVE_SYNC_ERROR"
-      exit 1
-    fi
-    printf 'ok: acquired live-sync lock for %s on %s\n' "$task_id" "$project"
     print_scopes
     ;;
   release)

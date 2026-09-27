@@ -2408,8 +2408,36 @@ EOF
   live_sync_refuse_lingering_processes "process(es) remain in endpoint process group"
 }
 
+live_sync_ps_env_available() {
+  local token out probe_pid status=1
+  [ "${FM_LIVE_SYNC_PS_ENV_PROOF_OVERRIDE:-1}" != 0 ] || return 1
+  token="fm-live-sync-proof-${BASHPID:-$$}-$RANDOM"
+  FM_LIVE_SYNC_PS_ENV_PROBE=$token "${BASH:-bash}" -c 'sleep 5' >/dev/null 2>&1 &
+  probe_pid=$!
+  out=$(ps -p "$probe_pid" -wwE -o command= 2>/dev/null) || out=
+  case "$out" in *"FM_LIVE_SYNC_PS_ENV_PROBE=$token"*) status=0 ;; esac
+  kill "$probe_pid" 2>/dev/null || true
+  wait "$probe_pid" 2>/dev/null || true
+  return "$status"
+}
+
+live_sync_ps_env_marker_pids() {  # <task-id> <live-root>
+  local marker_id=$1 marker_root=$2
+  ps -axo pid=,stat= -wwE -o command= 2>/dev/null | awk -v self="$$" -v id="$marker_id" -v root="$marker_root" '
+    {
+      pid = $1
+      stat = $2
+      line = $0
+      sub(/^[[:space:]]*[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+/, "", line)
+      if (pid == self || pid == "" || stat ~ /^Z/) next
+      if (id != "" && index(line, "FM_TASK_ID=" id) > 0) print pid
+      else if (root != "" && index(line, "LIVE_SYNC_ROOT=" root) > 0) print pid
+      else if (root != "" && index(line, "=" root) > 0) print pid
+    }'
+}
+
 live_sync_marker_pids() {
-  local marker_root=${LIVE_SYNC_ROOT:-} marker_id=${ID:-} proc_root=${FM_LIVE_SYNC_PROC_ROOT_OVERRIDE:-/proc} argv_pids env_pids pid env_file env
+  local marker_root=${LIVE_SYNC_ROOT:-} marker_id=${ID:-} proc_root=${FM_LIVE_SYNC_PROC_ROOT_OVERRIDE:-/proc} argv_pids env_pids pid env_file env ps_env_pids
   LIVE_SYNC_ENV_PROOF_AVAILABLE=0
   argv_pids=$(ps -axo pid=,stat=,args= 2>/dev/null | awk -v self="$$" -v id="$marker_id" '
     {
@@ -2438,6 +2466,9 @@ $pid"
     done <<EOF
 $(ps -axo pid= 2>/dev/null | tr -d ' ')
 EOF
+  elif live_sync_ps_env_available && ps_env_pids=$(live_sync_ps_env_marker_pids "$marker_id" "$marker_root"); then
+    LIVE_SYNC_ENV_PROOF_AVAILABLE=1
+    env_pids=$ps_env_pids
   fi
   LIVE_SYNC_MARKER_PIDS=$(printf '%s\n%s\n' "$argv_pids" "$env_pids" | grep -E '^[0-9]+$' | sort -un || true)
 }

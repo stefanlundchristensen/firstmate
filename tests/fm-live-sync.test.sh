@@ -12,6 +12,7 @@ TMP_ROOT=$(fm_test_tmproot fm-live-sync)
 PROJECT_MODE="$ROOT/bin/fm-project-mode.sh"
 BRIEF="$ROOT/bin/fm-brief.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
+LIVE_SYNC="$ROOT/bin/fm-live-sync.sh"
 
 make_vault() {  # <name>
   local dir=$1 root policy
@@ -128,7 +129,13 @@ EOF
   expect_code 3 "$rc" "live-sync forge registry refusal"
   assert_contains "$out" "live-sync publishes nothing" "live-sync forge refusal did not name the publish mismatch"
 
-  pass "fm-project-mode: live-sync root/policy queries and invalid token refusals"
+  out=$(FM_HOME="$home" "$LIVE_SYNC" acquire live-manual vault --scope Notes/a.md 2>&1)
+  rc=$?
+  expect_code 2 "$rc" "manual live-sync acquire refusal"
+  assert_contains "$out" "unknown command acquire" "manual acquire refusal did not name the removed command"
+  assert_absent "$home/state/live-sync-locks/live-manual.lock" "manual acquire created an unsupervised live-sync lock"
+
+  pass "fm-project-mode/fm-live-sync: registry queries, invalid token refusals, and no manual acquire"
 }
 
 fill_brief_subsections() {  # <file>

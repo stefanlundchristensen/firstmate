@@ -417,7 +417,7 @@ case "\${1:-}" in
 esac
 EOF
   chmod +x "$case_dir/fakebin/tmux"
-  FM_LIVE_SYNC_PROC_ROOT_OVERRIDE="$case_dir/no-proc" run_live_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  FM_LIVE_SYNC_PROC_ROOT_OVERRIDE="$case_dir/no-proc" FM_LIVE_SYNC_PS_ENV_PROOF_OVERRIDE=0 run_live_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   expect_code 1 "$rc" "missing environment ownership proof should retain live-sync lock"
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
@@ -425,6 +425,33 @@ EOF
   assert_present "$case_dir/state/live-sync-locks/task-x1.lock" "missing environment proof released live-sync lock"
   assert_grep "environment ownership cannot be inspected" "$case_dir/stderr" "missing environment proof refusal did not name unavailable proof"
   pass "live-sync teardown retains locks when environment ownership cannot be inspected"
+}
+
+test_ps_environment_probe_releases_lock_without_procfs() {
+  local case_dir vault pid rc=0
+  case_dir=$(make_live_case ps-env-proof 0)
+  vault="$case_dir/vault"
+  pid=$(start_owned_group_writer_outside_vault "$vault")
+  wait_for_pid "$pid" || { kill "$pid" 2>/dev/null || true; fail "ps-env-proof endpoint writer never started"; }
+  rm -f "$case_dir/fakebin/tmux"
+  cat > "$case_dir/fakebin/tmux" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}" in
+  display-message) printf '%s\n' '$pid' ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$case_dir/fakebin/tmux"
+  FM_LIVE_SYNC_PROC_ROOT_OVERRIDE="$case_dir/no-proc" run_live_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -eq 0 ] || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "ps environment proof teardown failed"; }
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "ps environment proof endpoint writer survived teardown"
+  fi
+  assert_absent "$case_dir/state/task-x1.meta" "ps environment proof left task metadata after cleanup"
+  assert_absent "$case_dir/state/live-sync-locks/task-x1.lock" "ps environment proof left live-sync lock after cleanup"
+  pass "live-sync teardown uses ps environment proof when procfs is absent"
 }
 
 test_missing_live_root_retains_lock_after_endpoint_reap() {
@@ -500,6 +527,7 @@ test_detached_endpoint_descendant_writer_is_stopped_before_lock_release
 test_trap_spawned_detached_writer_retains_lock
 test_daemonized_writer_retains_lock_without_current_descendants
 test_missing_env_ownership_probe_retains_lock
+test_ps_environment_probe_releases_lock_without_procfs
 test_missing_live_root_retains_lock_after_endpoint_reap
 test_herdr_endpoint_writer_outside_vault_is_stopped_before_lock_release
 test_missing_endpoint_ownership_retains_lock_without_killing_writer
