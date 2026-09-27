@@ -422,7 +422,7 @@ Retire a custom check only through `bin/fm-check-unregister.sh <id>` (or `bin/fm
 Tear down a ship task only after landing is confirmed, or after a `live-sync` worker reports its scoped direct edits complete.
 A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
 Never force teardown without explicit discard authority.
-For `live-sync`, teardown closes the worker record and releases the live-sync scope lock without touching the live directory through git or fleet sync.
+For `live-sync`, teardown closes the worker record and releases the scope lock only after it proves task-owned vault writers are stopped; if endpoint ownership, live-root inspection, or environment-marker inspection is unavailable, teardown retains the task record and lock without touching the live directory through git or fleet sync.
 After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.
 
 A secondmate is persistent and an empty queue is healthy.

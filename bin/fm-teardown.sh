@@ -69,6 +69,13 @@
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
+# live-sync ship tasks carve out of landed-work checks because the live root is
+# edited directly. Before their task record and scope lock are removed, teardown
+# must prove the recorded endpoint process group, captured descendants,
+# live-root cwd scan, and detached task-marker scan are quiescent. Missing
+# endpoint ownership, missing live root, missing lsof, or unavailable
+# process-environment proof is not quiescence: teardown refuses and retains the
+# task record plus state/live-sync-locks/<id>.lock.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared

@@ -23,7 +23,9 @@
 # Absence of allow or protect lines refuses every live-sync dispatch.
 #
 # Scope locks live under state/live-sync-locks/ and are durable until teardown
-# removes them with fm_live_sync_release_task.
+# proves task-owned live-root writers are stopped before calling
+# fm_live_sync_release_task; if that proof is unavailable, teardown retains the
+# task record and lock.
 # They are cooperative exclusion records, not an OS sandbox: a same-user worker
 # can still write outside its declared scope unless its own tool enforces more.
 # Firstmate mechanically validates the declared scopes and serializes overlapping

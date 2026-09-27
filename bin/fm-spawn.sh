@@ -33,7 +33,8 @@
 #   refused as a flag value. live-sync is a task mode only for projects
 #   registered as live-sync in data/projects.md; the project argument is the
 #   registry name, --live-scope is required at least once, --yolo must be off,
-#   no branch is created, and scope locks are held until teardown releases them.
+#   no branch is created, and scope locks are held until teardown proves the
+#   task has no remaining live-root writer or retains the task record and lock.
 #   --branch-prefix is the optional prefix selected at intake for this ship's
 #   immutable branch, defaulting to "fm/". It must agree with the branch recorded
 #   in the brief, and is refused on live-sync, scouts, secondmates, and relaunches.
