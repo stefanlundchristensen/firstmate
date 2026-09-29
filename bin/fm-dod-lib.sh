@@ -6,7 +6,7 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>]
+# fm_dod_block <no-mistakes|direct-PR|local-only|live-sync> <task-id> [branch] [<forge>]
 # prints the block on stdout with no trailing blank line. The caller validates the
 # mode; an unknown mode is refused rather than silently rendered as the pipeline
 # contract.
@@ -46,8 +46,8 @@
 # forge is none|gerrit and defaults to none; bin/fm-project-mode.sh's header owns
 # what the registry binding means, and this file owns what gerrit changes for a
 # WORKER (docs/gerrit-forge-integration.md is the design). A forge composes with
-# the two modes that publish and is refused on local-only, which publishes
-# nothing. On gerrit the worker publishes one squashed change with
+# the two modes that publish and is refused on local-only and live-sync, which
+# publish nothing. On gerrit the worker publishes one squashed change with
 # `gerrit-axi publish --squash` instead of opening a pull request: direct-PR does
 # that straight away, and no-mistakes first runs the pipeline with its three
 # forge-facing steps skipped and recovers the pipeline's own fix commits into its
@@ -95,6 +95,8 @@
 # ordinary ship brief and the durable contract written during scout promotion.
 # It takes the same optional trailing forge argument, because the rule that keeps
 # a worker off a remote is exactly the rule that changes when the forge does.
+# live-sync has no forge, branch, commit, or merge; its scope boundary is rendered
+# by bin/fm-brief.sh and enforced at spawn by bin/fm-live-sync-lib.sh.
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-pr-lib.sh"
@@ -122,9 +124,10 @@ EOF
 }
 
 # Closed-set gate shared by every forge-aware renderer and bin/fm-brief.sh, so a
-# caller cannot reach a half-rendered contract. local-only is refused rather than
-# rendered with an inert annotation: it publishes nothing, and its landing
-# fast-forwards local main with content the review server has never seen.
+# caller cannot reach a half-rendered contract. local-only and live-sync are
+# refused rather than rendered with an inert annotation: they publish nothing.
+# local-only lands by fast-forwarding local main with content the review server
+# has never seen, while live-sync edits its external directory directly.
 fm_forge_valid_for_mode() {  # <forge> <mode> <caller>
   local forge=$1 mode=$2 caller=$3
   case "$forge" in
@@ -137,10 +140,14 @@ fm_forge_valid_for_mode() {  # <forge> <mode> <caller>
     echo "error: $caller: forge=$forge cannot ship mode=local-only - that mode publishes nothing, so a forge has no meaning there, and its landing would fast-forward local main with content the review server has never seen; ship no-mistakes or direct-PR, which publish through the forge" >&2
     return 1
   fi
+  if [ "$forge" != none ] && [ "$mode" = live-sync ]; then
+    echo "error: $caller: forge=$forge cannot ship mode=live-sync - that mode publishes nothing and edits its registered external directory directly" >&2
+    return 1
+  fi
   return 0
 }
 
-fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>]
+fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only|live-sync> <task-id> [branch] [<forge>]
   local mode=$1 id=$2 forge=${4:-none}
   local branch=${3:-fm/$id}
   fm_forge_valid_for_mode "$forge" "$mode" fm_ship_rule_one || return 1
@@ -154,6 +161,9 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<
       ;;
     local-only)
       printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`$branch\` branch; firstmate handles the merge into local \`main\`."
+      ;;
+    live-sync)
+      printf '%s\n' '1. Never create a branch, commit, push, pull request, or merge for this work. Edit only the live-sync write scopes declared in this brief.'
       ;;
     no-mistakes)
       printf '%s\n' '1. Never push to the default branch. Never merge a PR.'
@@ -417,6 +427,19 @@ A \`done:\` is accepted when the named head is on this project's shared local br
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done [at=<epoch>]: ready in branch $branch\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
+EOF
+      ;;
+    live-sync:*)
+      cat <<EOF
+# Definition of done
+Delivery contract: mode=live-sync
+This task ships **live-sync**: direct edits to the registered live directory, with no branch, commit, push, pull request, pipeline, or merge.
+Firstmate mechanically validated the declared write scopes against the registered root and explicit protection policy, and it acquired a durable scope lock before launch.
+That lock serializes overlapping declared scopes and allows disjoint declared scopes to run at the same time.
+It is not a same-user filesystem sandbox: your tool could still write elsewhere, so you must keep actual edits inside the declared write scopes and away from protected core files.
+Do not create commits or staging branches to represent the edits.
+When the requested live edits are complete, append \`done [at=<epoch>]: {summary of live edits}\` to the status file and stop.
+Firstmate will clean up the worker record and release the live-sync scope lock; there is no merge ask for this mode.
 EOF
       ;;
     no-mistakes:*)

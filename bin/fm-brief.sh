@@ -14,7 +14,7 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--forge <none|gerrit> [--shape squash]] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only|live-sync> [--branch-prefix <prefix>] [--forge <none|gerrit> [--shape squash]] [--live-scope <relative-path>...] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -45,8 +45,10 @@
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                the configured merge authority approves, firstmate merges to local main
+#   live-sync    edit declared scopes in the registered external directory directly;
+#                no branch, commit, push, PR, pipeline, or merge
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
-# the three concrete modes at intake before calling this script.
+# the concrete task modes at intake before calling this script.
 # --branch-prefix <prefix> optionally overrides the ship branch's "fm/" prefix, so
 # the resolved branch is "<prefix><task-id>" instead of the default "fm/<task-id>".
 # Pass an empty prefix ("--branch-prefix ''") for a bare "<task-id>" branch, or a
@@ -57,16 +59,17 @@
 # registry's optional "branch=<prefix>" annotation (bin/fm-project-mode.sh's
 # header owns that format and its --branch-prefix query) is the captain's
 # standing per-project preference, and firstmate resolves it per task at intake
-# and passes the explicit flag. Refused on --scout and --secondmate: a scout
-# makes no branch and a charter is not a delivery contract.
+# and passes the explicit flag. Refused on live-sync, --scout, and --secondmate:
+# live-sync creates no branch, a scout makes no branch, and a charter is not a
+# delivery contract.
 # --forge names the project's forge, defaults to none, and is orthogonal to --mode
 # exactly as the registry's `forge=` token is. It is the captain's confirmed
 # registry binding, read from data/projects.md at intake and passed here; this
 # script never infers a forge and never looks the binding up, and bin/fm-spawn.sh
 # refuses a brief whose forge disagrees with the registry. bin/fm-project-mode.sh's
 # header owns what the binding means, and bin/fm-dod-lib.sh owns what `gerrit`
-# changes for the worker. A forge on --mode local-only is refused, because that
-# mode publishes nothing.
+# changes for the worker. A forge on --mode local-only or live-sync is refused,
+# because those modes publish nothing.
 # --shape names how a forge=gerrit task is published, and only `squash` - one
 # change - is accepted: `stack` is refused until a stack can be watched by its
 # membership pinned when its watch is armed, because the merge watch follows one
@@ -74,17 +77,21 @@
 # It defaults to squash on gerrit and is refused without it.
 # The generated ship brief records the chosen mode as a fixed machine-readable
 # "Delivery contract: mode=<mode>" line, followed by " forge=gerrit shape=squash"
-# on that forge. bin/fm-spawn.sh reads that line and refuses to launch a ship task
-# whose explicit --mode or registered forge disagrees, so an adjusted brief and the
-# recorded task metadata cannot drift apart.
-# Ship briefs begin with a worktree-isolation assertion before the branch step.
+# on that forge. A live-sync brief also records a "Live sync write scopes:" list
+# from one or more --live-scope flags. bin/fm-spawn.sh reads those lines and
+# refuses to launch a ship task whose explicit --mode, registered forge, or live
+# scope list disagrees, so an adjusted brief and the recorded task metadata cannot
+# drift apart.
+# Ship briefs begin with a worktree-isolation assertion before the branch step,
+# except live-sync briefs, which launch directly in the registered external
+# directory and rely on the explicit scope boundary instead.
 # Both crewmate scaffolds carry one shared rule against administering the
 # infrastructure every lane shares - the no-mistakes daemon and the worktree pool
 # their own slot came from - so ship and scout cannot drift apart. A secondmate
 # charter omits it: that home allocates and returns slots for its own crewmates.
-# --mode, --forge, and --shape are refused on scout and secondmate scaffolds: a
-# scout's deliverable is a report rather than a merge, and a charter is not a
-# delivery contract.
+# --mode, --forge, --shape, and --live-scope are refused on scout and secondmate
+# scaffolds: a scout's deliverable is a report rather than a merge, and a charter
+# is not a delivery contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
 # Every scaffold's status protocol distinguishes the configured
@@ -143,6 +150,7 @@ esac
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+CREWMATE_PAUSE_WAIT_EXAMPLES="pipeline, tests, review, CI, approval, or a long command"
 IFS= read -r -d '' CREWMATE_PAUSE_INSTRUCTIONS <<EOF || true
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - when deliberately waiting for work or an external condition expected to clear on its own, including your own validation round.
    Before ending your turn with your own background shell or monitor still running, or before waiting on your own pipeline run or a long foreground command, append \`$PAUSED_VERB [at=<epoch>]: {job and completion condition}\` to the status file.
@@ -191,6 +199,8 @@ FORGE=none
 FORGE_SET=0
 SHAPE=
 SHAPE_SET=0
+LIVE_SCOPES=()
+LIVE_SCOPE_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -203,6 +213,7 @@ for a in "$@"; do
       branch-prefix) BRANCH_PREFIX=$a; BRANCH_PREFIX_SET=1 ;;
       forge) FORGE=$a; FORGE_SET=1 ;;
       shape) SHAPE=$a; SHAPE_SET=1 ;;
+      live-scope) LIVE_SCOPES+=("$a"); LIVE_SCOPE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -221,6 +232,8 @@ for a in "$@"; do
     --forge=*) FORGE=${a#--forge=}; FORGE_SET=1 ;;
     --shape) want_value=shape ;;
     --shape=*) SHAPE=${a#--shape=}; SHAPE_SET=1 ;;
+    --live-scope) want_value="live-scope" ;;
+    --live-scope=*) LIVE_SCOPES+=("${a#--live-scope=}"); LIVE_SCOPE_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -238,11 +251,11 @@ if [ "$KIND" = ship ]; then
     exit 1
   }
   case "$MODE" in
-    no-mistakes|direct-PR|local-only) ;;
+    no-mistakes|direct-PR|local-only|live-sync) ;;
     no-mistakes-prod-only)
       echo "error: no-mistakes-prod-only is a registry policy, not a task mode; classify this task's surface and resolve it to no-mistakes or direct-PR at intake" >&2
       exit 1 ;;
-    *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
+    *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only, live-sync (got '$MODE')" >&2; exit 1 ;;
   esac
 elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
@@ -255,10 +268,30 @@ if [ "$KIND" != ship ] && [ "$BRANCH_PREFIX_SET" -eq 1 ]; then
   echo "error: --branch-prefix applies only to ship briefs; a scout makes no branch and a secondmate charter is not a delivery contract" >&2
   exit 1
 fi
+if [ "$KIND" = ship ] && [ "$MODE" = live-sync ] && [ "$BRANCH_PREFIX_SET" -eq 1 ]; then
+  echo "error: --branch-prefix does not apply to live-sync; that mode creates no branch" >&2
+  exit 1
+fi
 case "$BRANCH_PREFIX" in
   *' '*) echo "error: --branch-prefix must not contain a space (got '$BRANCH_PREFIX')" >&2; exit 1 ;;
   -*) echo "error: --branch-prefix must not start with '-' (got '$BRANCH_PREFIX')" >&2; exit 1 ;;
 esac
+# Live-sync scope declarations are the write boundary that fm-spawn.sh validates
+# and locks before launch. Other modes do not consume them, so accepting one
+# there would make an operator think a boundary was recorded when it was not.
+if [ "$KIND" = ship ] && [ "$MODE" = live-sync ]; then
+  [ "$LIVE_SCOPE_SET" -eq 1 ] || {
+    echo "error: live-sync briefs require at least one --live-scope <relative-path>" >&2
+    exit 1
+  }
+  for live_scope in "${LIVE_SCOPES[@]}"; do
+    [ -n "$live_scope" ] || { echo "error: --live-scope requires a non-empty value" >&2; exit 1; }
+  done
+elif [ "$LIVE_SCOPE_SET" -eq 1 ]; then
+  echo "error: --live-scope applies only to --mode live-sync" >&2
+  exit 1
+fi
+
 # The forge is validated against the same closed set the renderers enforce, so a
 # typo or an impossible mode/forge pair stops here rather than reaching a worker.
 if [ "$KIND" = ship ]; then
@@ -281,12 +314,16 @@ elif [ "$FORGE_SET" -eq 1 ] || [ "$SHAPE_SET" -eq 1 ]; then
   exit 1
 fi
 ID=${POS[0]}
-BRANCH="$BRANCH_PREFIX$ID"
-if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
-  echo "error: --branch-prefix and task id must form a valid git branch (got '$BRANCH')" >&2
-  exit 1
+BRANCH=
+BRANCH_Q=
+if [ "$KIND" = ship ] && [ "$MODE" != live-sync ]; then
+  BRANCH="$BRANCH_PREFIX$ID"
+  if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
+    echo "error: --branch-prefix and task id must form a valid git branch (got '$BRANCH')" >&2
+    exit 1
+  fi
+  printf -v BRANCH_Q '%q' "$BRANCH"
 fi
-printf -v BRANCH_Q '%q' "$BRANCH"
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
@@ -468,12 +505,8 @@ HERDR_SECTION=$(printf '%s\n' \
 'On Herdr 0.7.3 the API socket is not relocatable by `HERDR_CONFIG_PATH`, `XDG_CONFIG_HOME`, or `HOME`.' \
 'A named non-`default` session plus an explicit `--session <name>` Herdr option on every call is the only viable local isolation.' \
 '' \
-'For tmux-based lab primaries, `bin/fm-lab-home.sh` owns the short private socket directory; do not place `TMUX_TMPDIR` under the lab home or worktree.' \
-'Use `LAB_HOME_HELPER='"$(shell_quote "$FM_ROOT/bin/fm-lab-home.sh")"'`, then `LAB_TMUX_DIR=$("$LAB_HOME_HELPER" tmux-dir "$FM_HOME")` and launch tmux with `TMUX_TMPDIR="$LAB_TMUX_DIR"`.' \
-'Your single EXIT cleanup trap must kill only the server addressed through that `TMUX_TMPDIR`, call `"$LAB_HOME_HELPER" teardown "$FM_HOME"`, and call the Herdr teardown below; do not install a second trap that replaces either cleanup.' \
-'' \
 '1. Set `HERDR_LAB_HELPER='"$HERDR_LAB_HELPER"'` and generate the session name with `HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name '"$ID"')`.' \
-'   Install the combined EXIT cleanup before provisioning, then provision only with `"$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION"`.' \
+'   Install `trap '\''"$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"'\'' EXIT` before provisioning, then provision only with `"$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION"`.' \
 '2. Run every task-specific non-lifecycle Herdr command through `"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" <arguments...>`.' \
 '   The helper supplies the required `--session "$HERDR_LAB_SESSION"` as a Herdr option, before any `--` delimiter; `HERDR_SESSION` alone is never accepted as isolation.' \
 '3. Teardown only through `"$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"`.' \
@@ -597,6 +630,75 @@ fi
 # The block opens with the fixed "Delivery contract: mode=<mode>" line that
 # bin/fm-spawn.sh checks against its own explicit --mode and the project's
 # registered forge before launching.
+if [ "$MODE" = live-sync ]; then
+  LIVE_SCOPE_BLOCK="Live sync write scopes:"
+  for scope in "${LIVE_SCOPES[@]}"; do
+    LIVE_SCOPE_BLOCK="$LIVE_SCOPE_BLOCK
+- $scope"
+  done
+  RULE1=$(fm_ship_rule_one "$MODE" "$ID" "" "$FORGE") || exit 1
+  DOD=$(fm_dod_block "$MODE" "$ID" "" "$FORGE") || exit 1
+  cat > "$BRIEF" <<EOF
+You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+
+$TASK_SECTION
+
+$HERDR_SECTION
+
+# Setup
+You are launched in the registered live-sync directory for $REPO.
+This is the live directory, not a disposable copy, branch, or scratch worktree.
+Before editing, run \`pwd -P\` and confirm you are in the live-sync directory you were launched into.
+If the location is wrong or you are in a git project checkout instead, STOP - do not branch, commit, or edit - append \`blocked [at=<epoch>]: live-sync worker launched in the wrong directory\` to the status file and stop.
+
+$LIVE_SCOPE_BLOCK
+
+Firstmate mechanically validates those declared scopes against the registered live root and explicit protection policy, then keeps an overlapping-scope lock until cleanup.
+That is a cooperative safety boundary, not a same-user filesystem sandbox: your tools can still write elsewhere, so you must keep actual edits inside the declared scopes and away from protected core files.
+
+# Rules
+$RULE1
+2. Stay inside the live-sync directory; the only files you may write outside it are the status file below and Firstmate instruction-inbox acknowledgements.
+   Within the live-sync directory, write only the declared live-sync scopes above.
+   If the requested change needs a path outside those scopes or touches a protected core file, append \`needs-decision [at=<epoch>]: live-sync scope or protection policy does not cover {path}\` and stop.
+3. Do not use gh-axi or any forge tool for delivery; this mode creates no PR or review artifact.
+4. Report status by appending one line:
+   \`$STATUS_APPEND\`
+   States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+   Substitute \`<epoch>\` with the current Unix time in seconds - run \`date +%s\` and write the number it printed; a stamp that is not plain digits records no time at all.
+   Each append wakes firstmate, so report sparingly: only phase changes a supervisor
+   would act on (setup done, live edit complete) and the
+   needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;
+   firstmate reads your pane for that.
+   Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
+   https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
+   copies that URL from your line rather than assembling one.
+   A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
+   turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
+   Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
+   known external wait you expect to clear on its own ($CREWMATE_PAUSE_WAIT_EXAMPLES):
+   firstmate then leaves your idle pane alone and rechecks it on a long
+   cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
+5. If you hit the same obstacle twice, append \`blocked [at=<epoch>]: {why}\` and stop; firstmate will help.
+6. If a decision belongs above the implementation worker (product choices, destructive actions, scope or protection-policy expansion),
+   append \`needs-decision [at=<epoch>]: {summary of options}\` and stop. Firstmate will reply with the decision.
+   A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
+   Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
+$SHARED_INFRA_RULE
+
+$INBOX_SECTION
+
+# Project memory
+A project's \`AGENTS.md\` or \`CLAUDE.md\` is a protected core instruction surface unless the live-sync policy and declared scopes explicitly allow the exact correction.
+Even when allowed, edit it only to correct information that is factually wrong - including information your own change made wrong - and never to add knowledge because it is missing.
+A correction edits only the wrong text: do not run \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`, create either file, or add sections, headings, or pointers alongside it.
+
+$DOD
+EOF
+  append_brief_include
+  echo "scaffolded: $BRIEF (ship, mode=live-sync; replace {TASK} and {FIRSTMATE_SPEC})"
+  exit 0
+fi
 case "$MODE" in
   direct-PR)
     SETUP2=""

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir-or-live-sync-name> --mode <no-mistakes|direct-PR|local-only|live-sync> --yolo <on|off> [--branch-prefix <prefix>] [--live-scope <relative-path>...] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
@@ -30,14 +30,23 @@
 #   the explicit mode carries less rigor than the project's standing posture, a
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
-#   refused as a flag value.
+#   refused as a flag value. live-sync is a task mode only for projects
+#   registered as live-sync in data/projects.md; the project argument is the
+#   registry name, --live-scope is required at least once, --yolo must be off,
+#   no branch is created, and scope locks are held until teardown proves the
+#   task has no remaining live-root writer or retains the task record and lock.
 #   --branch-prefix is the optional prefix selected at intake for this ship's
 #   immutable branch, defaulting to "fm/". It must agree with the branch recorded
-#   in the brief, and is refused on scouts, secondmates, and relaunches. When the
-#   selected branch does not match the project's registered prefix, the spawn
+#   in the brief, and is refused on live-sync, scouts, secondmates, and relaunches.
+#   When the selected branch does not match the project's registered prefix, the spawn
 #   prints a one-line deviation notice and continues, because the registered
 #   prefix is the captain's standing preference and the brief agreement above
 #   already guarantees the worker's instructions match the branch.
+#   --live-scope declares one write scope for a live-sync task and may repeat.
+#   Each scope is validated against the registered live root and protection policy
+#   and then locked durably against overlapping live-sync tasks. Disjoint declared
+#   scopes may launch concurrently. This is not a same-user filesystem sandbox;
+#   it serializes declarations and the brief binds the worker's actual writes.
 #   Ship/scout launches always put fm-dod-lib.sh's current worker role scope
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
@@ -522,6 +531,8 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
+# shellcheck source=bin/fm-live-sync-lib.sh
+. "$SCRIPT_DIR/fm-live-sync-lib.sh"
 if ! LAUNCH_ENV_ENABLED=$(fm_config_source_present "$CONFIG/launch-env-allowlist"); then
   exit 1
 fi
@@ -644,6 +655,8 @@ MODE=
 YOLO=
 BRANCH_PREFIX=fm/
 TRACEPARENT_ARG=
+LIVE_SCOPES=()
+LIVE_SCOPE_SET=0
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -691,6 +704,10 @@ for a in "$@"; do
     branch-prefix)
       BRANCH_PREFIX=$a
       BRANCH_PREFIX_SET=1
+      ;;
+    live-scope)
+      LIVE_SCOPES+=("$a")
+      LIVE_SCOPE_SET=1
       ;;
     traceparent)
       TRACEPARENT_ARG=$a
@@ -749,6 +766,11 @@ for a in "$@"; do
     BRANCH_PREFIX=${a#--branch-prefix=}
     BRANCH_PREFIX_SET=1
     ;;
+  --live-scope) want_value="live-scope" ;;
+  --live-scope=*)
+    LIVE_SCOPES+=("${a#--live-scope=}")
+    LIVE_SCOPE_SET=1
+    ;;
   --traceparent) want_value=traceparent ;;
   --traceparent=*)
     TRACEPARENT_ARG=${a#--traceparent=}
@@ -785,6 +807,11 @@ done
   echo "error: --yolo requires a non-empty value" >&2
   exit 1
 }
+if [ "$LIVE_SCOPE_SET" -eq 1 ]; then
+  for live_scope in "${LIVE_SCOPES[@]}"; do
+    [ -n "$live_scope" ] || { echo "error: --live-scope requires a non-empty value" >&2; exit 1; }
+  done
+fi
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || {
   echo "error: --traceparent requires a non-empty value" >&2
   exit 1
@@ -835,6 +862,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: --relaunch reuses the task's recorded ship branch; --branch-prefix cannot override it" >&2
     exit 1
   }
+  [ "$LIVE_SCOPE_SET" -eq 0 ] || {
+    echo "error: --relaunch reuses the task's recorded live-sync scopes; --live-scope cannot override them" >&2
+    exit 1
+  }
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
@@ -842,7 +873,7 @@ else
   # and record no delivery posture; secondmate spawns hardcode theirs.
   if [ "$KIND" = ship ]; then
     [ "$MODE_SET" -eq 1 ] || {
-      echo "error: ship spawns require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
+      echo "error: ship spawns require --mode <no-mistakes|direct-PR|local-only|live-sync>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
       exit 1
     }
     [ "$YOLO_SET" -eq 1 ] || {
@@ -850,13 +881,13 @@ else
       exit 1
     }
     case "$MODE" in
-    no-mistakes | direct-PR | local-only) ;;
+    no-mistakes | direct-PR | local-only | live-sync) ;;
     no-mistakes-prod-only)
       echo "error: no-mistakes-prod-only is a registry policy, not a task mode; classify this task's surface and resolve it to no-mistakes or direct-PR at intake" >&2
       exit 1
       ;;
     *)
-      echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2
+      echo "error: --mode must be one of no-mistakes, direct-PR, local-only, live-sync (got '$MODE')" >&2
       exit 1
       ;;
     esac
@@ -867,6 +898,23 @@ else
       exit 1
       ;;
     esac
+    if [ "$MODE" = live-sync ] && [ "$YOLO" != off ]; then
+      echo "error: --yolo must be off for live-sync; that mode has no merge step" >&2
+      exit 1
+    fi
+    if [ "$MODE" = live-sync ]; then
+      [ "$LIVE_SCOPE_SET" -eq 1 ] || {
+        echo "error: live-sync ship spawns require at least one --live-scope <relative-path>" >&2
+        exit 1
+      }
+      [ "$BRANCH_PREFIX_SET" -eq 0 ] || {
+        echo "error: --branch-prefix does not apply to live-sync; that mode creates no branch" >&2
+        exit 1
+      }
+    elif [ "$LIVE_SCOPE_SET" -eq 1 ]; then
+      echo "error: --live-scope applies only to --mode live-sync" >&2
+      exit 1
+    fi
   else
     [ "$MODE_SET" -eq 0 ] || {
       echo "error: --mode applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
@@ -878,6 +926,10 @@ else
     }
     [ "$BRANCH_PREFIX_SET" -eq 0 ] || {
       echo "error: --branch-prefix applies only to ship spawns; a scout makes no branch and a secondmate records no ship branch" >&2
+      exit 1
+    }
+    [ "$LIVE_SCOPE_SET" -eq 0 ] || {
+      echo "error: --live-scope applies only to live-sync ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
       exit 1
     }
   fi
@@ -1194,6 +1246,8 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
+SPAWN_LIVE_SYNC_LOCK_ACQUIRED=0
+SPAWN_LIVE_SYNC_LOCK_PUBLISHED=0
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1324,6 +1378,17 @@ spawn_abort_cleanup() {
     if ! spawn_fresh_commit_rollback; then
       status=1
     fi
+  fi
+  if [ "$SPAWN_LIVE_SYNC_LOCK_ACQUIRED" = 1 ] &&
+    { [ "$SPAWN_LAUNCH_SENT" = 0 ] || [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; } &&
+    [ "$RELAUNCH" -eq 0 ] && [ "$SPAWN_LIVE_SYNC_LOCK_PUBLISHED" != 1 ]; then
+    SPAWN_LIVE_SYNC_LOCK_ACQUIRED=0
+    fm_live_sync_release_task "$STATE" "$ID" || true
+  elif [ "$SPAWN_LIVE_SYNC_LOCK_ACQUIRED" = 1 ] &&
+    { [ "$SPAWN_LAUNCH_SENT" = 0 ] || [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; } &&
+    [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+    SPAWN_LIVE_SYNC_LOCK_ACQUIRED=0
+    fm_live_sync_release_task "$STATE" "$ID" || true
   fi
   if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
     SPAWN_META_LOCK_HELD=0
@@ -1461,6 +1526,11 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ "$MODE_SET" -eq 0 ] || shared_args+=(--mode "$MODE")
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
   [ "$BRANCH_PREFIX_SET" -eq 0 ] || shared_args+=(--branch-prefix "$BRANCH_PREFIX")
+  if [ "$LIVE_SCOPE_SET" -eq 1 ]; then
+    for live_scope in "${LIVE_SCOPES[@]}"; do
+      shared_args+=(--live-scope "$live_scope")
+    done
+  fi
   for pair in "${POS[@]}"; do
     case "$pair" in
     *=*) : ;;
@@ -1493,12 +1563,14 @@ fm_task_id_creation_valid "$ID" || {
   echo "error: invalid task id" >&2
   exit 2
 }
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ]; then
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ] && [ "$MODE" != live-sync ]; then
   BRANCH="$BRANCH_PREFIX$ID"
   if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
     echo "error: --branch-prefix and task id must form a valid git branch (got '$BRANCH')" >&2
     exit 1
   fi
+elif [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ]; then
+  BRANCH=
 fi
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then
   fm_backlog_directory_present "$STATE" "state directory" || {
@@ -1530,7 +1602,6 @@ spawn_refuse_if_away_spend_cap() {
   [ "$KIND" != secondmate ] || return 0
   [ -f "$STATE/.afk-contract" ] || return 0
   FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" validate >/dev/null 2>&1 || return 0
-  [ "$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" mode 2>/dev/null)" = away ] || return 0
   cap=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" field spend_max_concurrent_workers 2>/dev/null || true)
   case "$cap" in
   '' | *[!0-9]* | 0) return 0 ;;
@@ -1546,16 +1617,15 @@ spawn_refuse_if_away_spend_cap() {
     exit 1
   fi
 }
-# Spend cap (bin/fm-afk-contract.sh's spend_max_concurrent_workers): while an
-# away record exists (never a quiet-mode one, whose captain is present and
-# spends as attended: bin/fm-afk-contract.sh mode), a fresh ordinary spawn
-# refuses for BOTH actors once this home already holds that many ordinary task
-# records, counted the same way the return brief counts tasks live at return
-# (every state/*.meta whose kind is not secondmate). A relaunch replaces a
-# worker that already counts, and a secondmate is a persistent home rather than
-# spend, so both are exempt. Checked before any endpoint, worktree, or record
-# exists, so a refusal costs nothing to unwind; rechecked after the task-set
-# lock so two fresh spawns cannot both publish from a stale count.
+# Spend cap (bin/fm-afk-contract.sh's spend_max_concurrent_workers): while the
+# away-posture record exists, a fresh ordinary spawn refuses for BOTH actors
+# once this home already holds that many ordinary task records, counted the
+# same way the return brief counts tasks live at return (every state/*.meta
+# whose kind is not secondmate). A relaunch replaces a worker that already
+# counts, and a secondmate is a persistent home rather than spend, so both are
+# exempt. Checked before any endpoint, worktree, or record exists, so a refusal
+# costs nothing to unwind; rechecked after the task-set lock so two fresh
+# spawns cannot both publish from a stale count.
 spawn_refuse_if_away_spend_cap
 spawn_require_relocated_queued_work() {
   local actor
@@ -1656,6 +1726,10 @@ if [ "$RELAUNCH" -eq 0 ]; then
     echo "error: backend=cmux does not support --secondmate spawns yet" >&2
     exit 1
   fi
+  if [ "$BACKEND" = orca ] && [ "$KIND" = ship ] && [ "$MODE" = live-sync ]; then
+    echo "error: backend=orca creates its own disposable worktree and cannot launch a live-sync worker directly in the registered external directory" >&2
+    exit 1
+  fi
   if [ "$BACKEND" = orca ]; then
     fm_backend_orca_runtime_check || exit 1
   fi
@@ -1706,6 +1780,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_TARGET=$FM_BACKEND_VALIDATED_TARGET
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
+  if [ "$BACKEND" = orca ]; then
+    relaunch_mode=$(fm_meta_get "$RELAUNCH_META" mode)
+    if [ "$relaunch_mode" = live-sync ]; then
+      echo "error: backend=orca cannot relaunch a live-sync worker directly in the registered external directory" >&2
+      exit 1
+    fi
+  fi
   # A relaunch must PROVE the previous agent is gone before it launches another
   # one into the same endpoint, and only tmux and herdr have a recovery-grade
   # classifier that can (bin/fm-control-lib.sh owns that capability table).
@@ -1779,11 +1860,37 @@ if [ "$RELAUNCH" -eq 1 ]; then
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
   if [ "$KIND" = ship ]; then
-    BRANCH=$(fm_meta_get "$RELAUNCH_META" branch)
-    [ -n "$BRANCH" ] || BRANCH="fm/$ID"
-    if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
-      echo "error: task $ID has an invalid recorded ship branch '$BRANCH'" >&2
-      exit 1
+    if [ "$MODE" = live-sync ]; then
+      BRANCH=
+      LIVE_SCOPES=()
+      FM_LIVE_SYNC_SCOPE_KINDS=()
+      FM_LIVE_SYNC_SCOPE_RELS=()
+      while IFS= read -r meta_line || [ -n "$meta_line" ]; do
+        case "$meta_line" in
+          live_sync_scope=*)
+            meta_value=${meta_line#live_sync_scope=}
+            meta_kind=${meta_value%%$'\t'*}
+            meta_rel=${meta_value#*$'\t'}
+            case "$meta_kind" in dir|file) ;; *) echo "error: task $ID has an invalid recorded live-sync scope kind '$meta_kind'" >&2; exit 1 ;; esac
+            [ -n "$meta_rel" ] || { echo "error: task $ID has an empty recorded live-sync scope" >&2; exit 1; }
+            FM_LIVE_SYNC_SCOPE_KINDS+=("$meta_kind")
+            FM_LIVE_SYNC_SCOPE_RELS+=("$meta_rel")
+            LIVE_SCOPES+=("$meta_rel")
+            ;;
+        esac
+      done < "$RELAUNCH_META"
+      [ "${#LIVE_SCOPES[@]}" -gt 0 ] || {
+        echo "error: task $ID has no recorded live-sync scopes; refusing to relaunch without a write boundary" >&2
+        exit 1
+      }
+      LIVE_SCOPE_SET=1
+    else
+      BRANCH=$(fm_meta_get "$RELAUNCH_META" branch)
+      [ -n "$BRANCH" ] || BRANCH="fm/$ID"
+      if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
+        echo "error: task $ID has an invalid recorded ship branch '$BRANCH'" >&2
+        exit 1
+      fi
     fi
   fi
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
@@ -2366,6 +2473,13 @@ if [ "$HARNESS" = omp ]; then
 fi
 if [ "$HARNESS" = agy ]; then
   agy_model_validate "$AGY_BIN" "$MODEL" || exit 1
+fi
+if [ "$KIND" = ship ] && [ "$MODE" = live-sync ]; then
+  case "$HARNESS" in
+    claude*|opencode*|grok*|kimi*|agy)
+      echo "error: live-sync refuses harness '$HARNESS' because this adapter writes task hook or trust marker files inside the workspace; choose a Pi-family or other state-only adapter until that adapter has a live-sync-safe launch path" >&2
+      exit 1 ;;
+  esac
 fi
 # Worker account pin (header above): resolved before any endpoint, worktree, or
 # record exists. An absent pin selects nothing and leaves every later launch
@@ -2982,11 +3096,35 @@ if [ "$KIND" = secondmate ]; then
     BRIEF="$DATA/$ID/brief.md"
   fi
 else
-  PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
+  if [ "$KIND" = ship ] && [ "$MODE" = live-sync ]; then
+    PROJ_NAME=$PROJ
+    case "$PROJ_NAME" in */*|'' )
+      echo "error: live-sync spawns take the registered project name, not a path (got '$PROJ')" >&2
+      exit 1 ;;
+    esac
+    if [ "$RELAUNCH" -eq 1 ]; then
+      LIVE_SYNC_ROOT_TOKEN=$(fm_meta_get "$RELAUNCH_META" live_sync_root)
+      [ -n "$LIVE_SYNC_ROOT_TOKEN" ] || {
+        echo "error: task $ID has no recorded live-sync root; refusing to relaunch" >&2
+        exit 1
+      }
+    else
+      LIVE_SYNC_ROOT_TOKEN=$(fm_live_sync_project_root "$FM_ROOT" "$PROJ_NAME") || {
+        echo "error: $ID cannot launch: $PROJ_NAME is not a complete live-sync registry entry; correct data/projects.md" >&2
+        exit 1
+      }
+    fi
+    PROJ_ABS=$(fm_live_sync_canonical_root "$LIVE_SYNC_ROOT_TOKEN") || {
+      echo "error: live-sync root for $PROJ_NAME is not a readable non-root directory: $LIVE_SYNC_ROOT_TOKEN" >&2
+      exit 1
+    }
+  else
+    PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
+  fi
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$MODE" != live-sync ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
     echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
     exit 1
@@ -2996,6 +3134,30 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ];
     exit 1
   fi
   SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=1
+fi
+LIVE_SYNC_POLICY_TOKEN=
+LIVE_SYNC_POLICY_ABS=
+if [ "$KIND" = ship ] && [ "$MODE" = live-sync ]; then
+  if [ "$RELAUNCH" -eq 1 ]; then
+    LIVE_SYNC_POLICY_ABS=$(fm_meta_get "$RELAUNCH_META" live_sync_policy)
+    [ -n "$LIVE_SYNC_POLICY_ABS" ] || {
+      echo "error: task $ID has no recorded live-sync protection policy; refusing to relaunch" >&2
+      exit 1
+    }
+    LIVE_SYNC_POLICY_ABS=$(fm_live_sync_canonical_policy "$PROJ_ABS" "$LIVE_SYNC_POLICY_ABS") || {
+      echo "error: recorded live-sync policy for $ID is not a readable regular file: $(fm_meta_get "$RELAUNCH_META" live_sync_policy)" >&2
+      exit 1
+    }
+  else
+    LIVE_SYNC_POLICY_TOKEN=$(fm_live_sync_project_policy_token "$FM_ROOT" "$PROJ_NAME") || {
+      echo "error: $ID cannot launch: live-sync project $PROJ_NAME has no explicit protection policy token; correct data/projects.md" >&2
+      exit 1
+    }
+    LIVE_SYNC_POLICY_ABS=$(fm_live_sync_canonical_policy "$PROJ_ABS" "$LIVE_SYNC_POLICY_TOKEN") || {
+      echo "error: live-sync policy for $PROJ_NAME is not a readable regular file: $LIVE_SYNC_POLICY_TOKEN" >&2
+      exit 1
+    }
+  fi
 fi
 [ -f "$BRIEF" ] || {
   echo "error: task $ID has no brief at inaccessible data path $BRIEF" >&2
@@ -3054,7 +3216,7 @@ delivery_rigor_rank() { # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task 
   case "$1" in
   no-mistakes) echo 3 ;;
   direct-PR) echo 2 ;;
-  local-only) echo 1 ;;
+  local-only|live-sync) echo 1 ;;
   *) echo 0 ;;
   esac
 }
@@ -3065,7 +3227,11 @@ delivery_rigor_rank() { # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task 
 # would launch a worker whose instructions and whose recorded task delivery
 # differ, which is the exact drift this contract prevents.
 if [ "$KIND" = ship ]; then
-  PROJ_NAME=$(basename "$PROJ_ABS")
+  if [ "$MODE" = live-sync ]; then
+    PROJ_NAME=$PROJ
+  else
+    PROJ_NAME=$(basename "$PROJ_ABS")
+  fi
   # The parser's own refusal reaches the operator here rather than being
   # discarded: an entry it refuses (an unknown forge token, or a forge on
   # local-only) resolves to no posture at all, and launching on the silent
@@ -3082,7 +3248,12 @@ if [ "$KIND" = ship ]; then
   BRIEF_FORGE=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]forge=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   [ -n "$BRIEF_FORGE" ] || BRIEF_FORGE=none
   BRIEF_BRANCH=$(sed -n 's/^Ship branch: //p' "$BRIEF" | head -n 1)
-  if [ -n "$BRIEF_BRANCH" ]; then
+  if [ "$MODE" = live-sync ]; then
+    [ -z "$BRIEF_BRANCH" ] || {
+      echo "error: live-sync brief for $ID must not record a Ship branch (found $BRIEF_BRANCH)" >&2
+      exit 1
+    }
+  elif [ -n "$BRIEF_BRANCH" ]; then
     [ "$BRIEF_BRANCH" = "$BRANCH" ] || {
       echo "error: branch mismatch for $ID: the brief says branch=$BRIEF_BRANCH but this spawn selected branch=$BRANCH" >&2
       exit 1
@@ -3104,6 +3275,40 @@ if [ "$KIND" = ship ]; then
     echo "warning: $BRIEF records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode $MODE - confirm its definition of done matches" >&2
   elif [ "$BRIEF_MODE" != "$MODE" ]; then
     echo "error: delivery mismatch for $ID: the brief says mode=$BRIEF_MODE but this spawn passed --mode $MODE; correct the flag or re-scaffold the brief so the worker's instructions and the task record agree" >&2
+    exit 1
+  fi
+  BRIEF_LIVE_SCOPES=$(awk '
+    $0 == "Live sync write scopes:" { in_scopes = 1; next }
+    in_scopes && /^- / { print substr($0, 3); next }
+    in_scopes && /^$/ { next }
+    in_scopes { exit }
+  ' "$BRIEF")
+  if [ "$MODE" = live-sync ]; then
+    [ -n "$BRIEF_LIVE_SCOPES" ] || {
+      echo "error: live-sync brief for $ID records no Live sync write scopes list; re-scaffold with --live-scope" >&2
+      exit 1
+    }
+    BRIEF_LIVE_SCOPE_ARGS=()
+    while IFS= read -r live_scope || [ -n "$live_scope" ]; do
+      [ -n "$live_scope" ] || continue
+      BRIEF_LIVE_SCOPE_ARGS+=("$live_scope")
+    done <<< "$BRIEF_LIVE_SCOPES"
+    if ! fm_live_sync_validate_scopes "$PROJ_ABS" "$LIVE_SYNC_POLICY_ABS" "${BRIEF_LIVE_SCOPE_ARGS[@]}"; then
+      echo "error: live-sync brief for $ID records invalid write scopes: $FM_LIVE_SYNC_ERROR" >&2
+      exit 1
+    fi
+    BRIEF_LIVE_SCOPES=$(printf '%s\n' "${FM_LIVE_SYNC_SCOPE_RELS[@]}")
+    if ! fm_live_sync_validate_scopes "$PROJ_ABS" "$LIVE_SYNC_POLICY_ABS" "${LIVE_SCOPES[@]}"; then
+      echo "error: live-sync --live-scope values for $ID are invalid: $FM_LIVE_SYNC_ERROR" >&2
+      exit 1
+    fi
+    CLI_LIVE_SCOPES=$(printf '%s\n' "${FM_LIVE_SYNC_SCOPE_RELS[@]}")
+    [ "$BRIEF_LIVE_SCOPES" = "$CLI_LIVE_SCOPES" ] || {
+      echo "error: live-sync scope mismatch for $ID: the brief scopes differ from --live-scope flags; re-scaffold or pass the matching scope list" >&2
+      exit 1
+    }
+  elif [ -n "$BRIEF_LIVE_SCOPES" ]; then
+    echo "error: $BRIEF records live-sync scopes but this spawn passed --mode $MODE" >&2
     exit 1
   fi
   # The registered forge is the captain's confirmed binding (bin/fm-project-mode.sh)
@@ -3132,7 +3337,7 @@ if [ "$KIND" = ship ]; then
   # unregistered project resolves to the same no-mistakes standing default, which
   # is why the notice names the standing posture rather than the registry line. A
   # conditional policy is excluded: both of its legs are legitimate classifications.
-  if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] &&
+  if [ "$MODE" != live-sync ] && [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] &&
     [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
   fi
@@ -3141,10 +3346,20 @@ if [ "$KIND" = ship ]; then
   # spawn that ships the legacy fm/ prefix past a registered override is
   # announced, not refused: the brief-vs-spawn agreement above already
   # guarantees the worker's instructions match the branch this spawn selected.
-  STANDING_BRANCH=$("$FM_ROOT/bin/fm-project-mode.sh" --branch-prefix "$PROJ_NAME" 2>/dev/null) || STANDING_BRANCH=
-  if [ "$BRANCH" != "$STANDING_BRANCH$ID" ]; then
-    echo "notice: $ID ships branch=$BRANCH while $PROJ_NAME registers the ship-branch prefix '$STANDING_BRANCH' (branch $STANDING_BRANCH$ID) - the task's branch and PR will read as firstmate-authored; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+  if [ "$MODE" != live-sync ]; then
+    STANDING_BRANCH=$("$FM_ROOT/bin/fm-project-mode.sh" --branch-prefix "$PROJ_NAME" 2>/dev/null) || STANDING_BRANCH=
+    if [ "$BRANCH" != "$STANDING_BRANCH$ID" ]; then
+      echo "notice: $ID ships branch=$BRANCH while $PROJ_NAME registers the ship-branch prefix '$STANDING_BRANCH' (branch $STANDING_BRANCH$ID) - the task's branch and PR will read as firstmate-authored; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+    fi
   fi
+fi
+
+if [ "$KIND" = ship ] && [ "$MODE" = live-sync ]; then
+  if ! FM_LIVE_SYNC_ACQUIRE_REUSE_SAME_ID=$RELAUNCH fm_live_sync_acquire_task "$STATE" "$ID" "$PROJ_NAME" "$PROJ_ABS" "$LIVE_SYNC_POLICY_ABS" "${LIVE_SCOPES[@]}"; then
+    echo "error: live-sync scope lock refused for $ID: $FM_LIVE_SYNC_ERROR" >&2
+    exit 1
+  fi
+  SPAWN_LIVE_SYNC_LOCK_ACQUIRED=1
 fi
 
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
@@ -4216,7 +4431,11 @@ elif [ "$RELAUNCH" -eq 1 ]; then
       exit 1
     fi
   fi
-  [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
+  if [ "$KIND" != secondmate ] && [ "$MODE" != live-sync ]; then
+    validate_spawn_worktree "relaunch" "$T"
+  fi
+elif [ "$KIND" = ship ] && [ "$MODE" = live-sync ]; then
+  WT=$PROJ_ABS
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
@@ -4299,7 +4518,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     SPAWN_SLOT_CLAIMED=1
   fi
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$MODE" != live-sync ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
@@ -4307,8 +4526,12 @@ fi
 # adoption. This also updates Herdr's restored pane shell before any harness is
 # started, so a later host restart inherits the task worktree rather than the
 # tab's original project directory.
-spawn_enter_recorded_worktree
-spawn_assert_agent_worktree
+if [ "$MODE" = live-sync ]; then
+  spawn_enter_recorded_worktree
+else
+  spawn_enter_recorded_worktree
+  spawn_assert_agent_worktree
+fi
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,
 # at the first point that directory is known and before any per-task state is
@@ -4788,8 +5011,9 @@ fi
 # chains the previous hooks so they still run. Real secondmate
 # homes are firstmate clones; a launch whose worktree is not git fails closed
 # rather than shipping a runtime that cannot strip.
-GIT_HOOKS_DIR="$STATE_REAL/$ID.git-hooks"
-if [ "$KEEP_AI_TRAILERS" = 0 ]; then
+GIT_HOOKS_DIR=
+if [ "$MODE" != live-sync ] && [ "$KEEP_AI_TRAILERS" = 0 ]; then
+  GIT_HOOKS_DIR="$STATE_REAL/$ID.git-hooks"
   "$FM_ROOT/bin/fm-git-strip-ai-trailers.sh" install "$GIT_HOOKS_DIR" "$WT" || {
     echo "error: could not install the AI-trailer strip hooks for $ID" >&2
     exit 1
@@ -4859,7 +5083,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch live_sync_project live_sync_root live_sync_policy live_sync_scope tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4869,12 +5093,24 @@ preserve_relaunch_meta() {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
   echo "worktree=$WT"
-  echo "project=$PROJ_ABS"
+  if [ "$MODE" = live-sync ]; then
+    echo "project=$PROJ_NAME"
+  else
+    echo "project=$PROJ_ABS"
+  fi
   echo "harness=$HARNESS"
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
   [ -z "${BRANCH:-}" ] || echo "branch=$BRANCH"
+  if [ "$MODE" = live-sync ]; then
+    echo "live_sync_project=$PROJ_NAME"
+    echo "live_sync_root=$PROJ_ABS"
+    [ -z "$LIVE_SYNC_POLICY_ABS" ] || echo "live_sync_policy=$LIVE_SYNC_POLICY_ABS"
+    for ((i=0; i < ${#FM_LIVE_SYNC_SCOPE_RELS[@]}; i++)); do
+      printf 'live_sync_scope=%s\t%s\n' "${FM_LIVE_SYNC_SCOPE_KINDS[$i]}" "${FM_LIVE_SYNC_SCOPE_RELS[$i]}"
+    done
+  fi
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
@@ -5148,7 +5384,7 @@ fi
 # to keeping trailers, leave core.hooksPath alone so the repository's hooks run
 # directly. An export statement inside the pane command carries the override
 # across every step of a compound raw launch while firstmate's own git is unchanged.
-if [ "$KEEP_AI_TRAILERS" = 0 ]; then
+if [ "$KEEP_AI_TRAILERS" = 0 ] && [ "$MODE" != live-sync ]; then
   LAUNCH="export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=$(shell_quote "$GIT_HOOKS_DIR"); $LAUNCH"
 fi
 # Every agent this fleet launches - crewmate, scout, and secondmate, on a fresh
@@ -5392,7 +5628,6 @@ if [ "$HARNESS" = agy ]; then
     exit 1
   fi
 fi
-
 if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
     if fm_config_reread_quarantine_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
@@ -5437,7 +5672,11 @@ else
 fi
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   if [ "$RELAUNCH" -eq 0 ]; then
-    if spawn_fresh_commit_rollback; then
+    if [ "$MODE" = live-sync ] && [ "$SPAWN_LAUNCH_SENT" = 1 ] && [ "$SPAWN_ENDPOINT_CLOSED" != 1 ]; then
+      SPAWN_FRESH_COMMIT_PENDING=0
+      SPAWN_LIVE_SYNC_LOCK_PUBLISHED=$SPAWN_LIVE_SYNC_LOCK_ACQUIRED
+      echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its live-sync task record and scope lock were preserved so teardown can supervise cleanup of endpoint $T" >&2
+    elif spawn_fresh_commit_rollback; then
       echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its record was removed so no worker is left that the backlog does not own - close out endpoint $T and local copy $WT by hand, then re-run the spawn" >&2
     else
       echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR), and failed-dispatch cleanup is incomplete; the provisional record may remain at $STATE/$ID.meta - close out endpoint $T and local copy $WT by hand, then remove the record and busy state before retrying" >&2
@@ -5466,6 +5705,7 @@ if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   echo "error: spawn of $ID was interrupted after launch delivery began; $SPAWN_PRESERVED_CLAIM" >&2
   exit "$SPAWN_DEFERRED_SIGNAL_STATUS"
 fi
+SPAWN_LIVE_SYNC_LOCK_PUBLISHED=$SPAWN_LIVE_SYNC_LOCK_ACQUIRED
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0
 

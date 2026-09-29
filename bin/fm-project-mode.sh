@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Resolve a project's REGISTERED delivery posture from the data/projects.md registry.
 # Default usage prints two words to stdout: "<mode> <yolo>" where mode is one of
-# no-mistakes|direct-PR|local-only and yolo is on|off.
+# no-mistakes|direct-PR|local-only|live-sync and yolo is on|off.
 # --branch-prefix instead prints one value: the project's registered ship-branch
 # prefix, "fm/" when the project registers none, is unregistered, or the registry
 # is absent, so every existing installation keeps its current "fm/<task-id>"
@@ -9,36 +9,46 @@
 # With --forge it prints one word instead: the project's registered forge,
 # none|gerrit. The forge is asked for explicitly, so the default output stays
 # the same two words for every project, bound or not.
+# With --live-root or --live-policy it prints the registered live-sync root or
+# protection policy path for a live-sync project and refuses a non-live-sync row.
 #
 # MECHANICAL CONSUMERS ONLY. This answers "what posture did the captain register
 # for this project", never "how does this task ship". A task's delivery mode,
-# yolo, and ship-branch prefix are resolved by firstmate at intake and passed
-# explicitly to bin/fm-brief.sh, bin/fm-spawn.sh, and bin/fm-promote.sh (AGENTS.md
-# section 7; bin/fm-brief.sh's own header owns the --branch-prefix flag it accepts).
-# The consumers are bin/fm-fleet-sync.sh (skip local-only clones),
-# bin/fm-home-seed.sh and bin/fm-remote-home-seed.sh (refuse local-only seeding,
-# run no-mistakes init), bin/fm-spawn.sh's advisory registry-deviation notice,
-# and --forge for bin/fm-spawn.sh's forge agreement and yolo refusal and for
+# yolo, ship-branch prefix, and live-sync write scopes are resolved by firstmate
+# at intake and passed explicitly to bin/fm-brief.sh, bin/fm-spawn.sh, and any
+# promotion path that supports that mode (AGENTS.md section 7; bin/fm-brief.sh's
+# own header owns the --branch-prefix and --live-scope flags it accepts).
+# The consumers are bin/fm-fleet-sync.sh (skip local-only and live-sync entries),
+# bin/fm-home-seed.sh and bin/fm-remote-home-seed.sh (refuse local-only and
+# live-sync seeding, run no-mistakes init where applicable), bin/fm-spawn.sh's
+# advisory registry-deviation notice and live-sync root/policy resolution, and
+# --forge for bin/fm-spawn.sh's forge agreement and yolo refusal and for
 # bin/fm-promote.sh, which takes the forge binding from here because it is a
 # project fact rather than a task choice.
 #
 # Registry line format (data/projects.md):
-#   - <name> - <desc> (added <date>)                                 -> no-mistakes off fm/  (legacy default)
-#   - <name> [<mode>] - <desc> (added <date>)                        -> <mode> off fm/
-#   - <name> [<mode> +yolo] - <desc> (added <date>)                  -> <mode> on fm/
-#   - <name> [<mode> +yolo branch=<prefix>] - <desc> (added <date>)  -> <mode> <yolo> <prefix>
-#   - <name> [<mode> forge=gerrit] - <desc> (added <date>)           -> <mode> off, --forge gerrit
+#   - <name> - <desc> (added <date>)                                                -> no-mistakes off fm/  (legacy default)
+#   - <name> [<mode>] - <desc> (added <date>)                                       -> <mode> off fm/
+#   - <name> [<mode> +yolo] - <desc> (added <date>)                                 -> <mode> on fm/
+#   - <name> [<mode> +yolo branch=<prefix>] - <desc> (added <date>)                 -> <mode> <yolo> <prefix>
+#   - <name> [<mode> forge=gerrit] - <desc> (added <date>)                          -> <mode> off, --forge gerrit
+#   - <name> [live-sync path=<absolute-root> policy=<policy-path>] - <desc> (...)    -> live-sync off
 #   <name> may contain spaces; it ends at the literal " [" or " - " that follows it.
-#   Bracket tokens are order-independent: +yolo, branch=<prefix>, and forge=<value>
-#   are recognized by their own shape wherever they appear, and whichever token is
-#   left over is the mode. <prefix> must not contain a space; an empty override
-#   ("branch=") resolves to "" for a bare "<task-id>" ship branch instead of the
-#   legacy "fm/<task-id>".
+#   Bracket tokens are order-independent: +yolo, branch=<prefix>, forge=<value>,
+#   path=<absolute-root>, and policy=<path> are recognized by their own shape
+#   wherever they appear, and whichever token is left over is the mode. <prefix>
+#   must not contain a space; an empty override ("branch=") resolves to "" for
+#   a bare "<task-id>" ship branch instead of the legacy "fm/<task-id>".
+#   <policy-path> may be absolute or relative to the live root; bin/fm-live-sync-lib.sh
+#   owns path canonicalization and the protection-policy syntax.
 #
 # Registered modes:
 #   no-mistakes            full pipeline -> PR -> configured merge authority (default)
 #   direct-PR              push + PR via gh-axi, no pipeline
 #   local-only             local branch, no remote/PR, guarded local merge
+#   live-sync              external live directory, no branch/commit/PR; worker
+#                          edits only declared write scopes after live-sync
+#                          path/policy validation and scope-lock acquisition
 #   no-mistakes-prod-only  a conditional policy, not a task mode: firstmate
 #                          classifies each task's surface at intake (the
 #                          project-management skill owns that classification).
@@ -46,12 +56,14 @@
 #                          no-mistakes, so sync, seeding, and init treat such a
 #                          project as the remote-backed pipeline project it is.
 # yolo (orthogonal) = merge authority only: when on, firstmate merges green,
-#   in-scope work itself (AGENTS.md section 7).
+#   in-scope work itself (AGENTS.md section 7). It is refused on live-sync,
+#   which has no merge step.
 # branch=<prefix> (orthogonal) = overrides the "fm/" ship-branch prefix so a
 #   project's branch and PR do not read as firstmate-authored, e.g. for a
 #   third-party repo that does not use this tooling. Query it with
 #   --branch-prefix; it never appears in the default "<mode> <yolo>" output, so
-#   existing mechanical callers are unaffected by its presence.
+#   existing mechanical callers are unaffected by its presence. It is ignored by
+#   live-sync dispatch, which creates no branch.
 # forge (orthogonal, and orthogonal to yolo too) = which forge the project's
 #   remote actually is, never inferred from mode, remote name, host, or protocol.
 #   `none` means a forge whose pull requests and checks no-mistakes already
@@ -62,10 +74,11 @@
 #   bin/fm-forge-detect.sh proposes it from a protocol fact at project-add
 #   intake, and the captain's confirmation is what this record holds.
 #   A forge describes what a mode publishes, so it composes with no-mistakes and
-#   direct-PR and is REFUSED on local-only, which publishes nothing: that mode
-#   lands by fast-forwarding local main, which on a review-server project
-#   advances it with content the server has never seen
-#   (docs/gerrit-forge-integration.md section 3).
+#   direct-PR and is REFUSED on local-only and live-sync, which publish nothing.
+#   local-only lands by fast-forwarding local main, which on a review-server
+#   project advances it with content the server has never seen
+#   (docs/gerrit-forge-integration.md section 3); live-sync edits the registered
+#   external directory directly and has no review artifact.
 #
 # A registered `forge=gerrit` project reports yolo=off with an explicit stderr
 # refusal, on the captain's decision of 2026-09-15: a Gerrit Code-Review+2 is a
@@ -79,21 +92,21 @@
 # An unknown/missing project or unknown mode falls back to "no-mistakes off" (or
 # "fm/" under --branch-prefix) and warns to stderr, so a typo never silently
 # drops the gate. Other annotation tokens are ignored, as they always were, keyed
-# ones included: a `<key>=<value>` token whose key is neither exactly `forge` nor
-# `branch` resolves as it did before the forge existed, and in the mode slot it
-# is read as an unknown mode. A key one or two edits from `forge` (such as
-# `forg=` or `Forge=`) is still ignored, with one stderr warning naming the token
-# and the forge=gerrit spelling. The one refusal is a malformed forge binding - a
-# `forge=` token whose value is empty or outside the closed set - which is
-# REFUSED in the default and --forge output forms: nothing on stdout, exit
-# status 3, the token named. Resolving it to "no registered forge" would hand a
-# Gerrit project the pull-request contract the binding exists to prevent.
-# local-only with a forge is refused the same way. --branch-prefix does not make
-# that check: it answers only the registered prefix, and a prefix is orthogonal
-# to the forge binding, so it prints even when the forge token is malformed;
-# every path that reads the forge binding (default, --forge, and spawn's
-# forge-agreement check) still refuses.
-# Usage: fm-project-mode.sh [--raw|--branch-prefix|--forge] <project-name>
+# ones included: a `<key>=<value>` token whose key is not exactly one of the
+# recognized keys resolves as it did before the forge existed, and in the mode
+# slot it is read as an unknown mode. A key one or two edits from `forge` (such
+# as `forg=` or `Forge=`) is still ignored, with one stderr warning naming the
+# token and the forge=gerrit spelling. The one refusal is a malformed forge
+# binding - a `forge=` token whose value is empty or outside the closed set -
+# which is REFUSED in the default and --forge output forms: nothing on stdout,
+# exit status 3, the token named. Resolving it to "no registered forge" would
+# hand a Gerrit project the pull-request contract the binding exists to prevent.
+# local-only or live-sync with a forge is refused the same way. --branch-prefix
+# does not make that check: it answers only the registered prefix, and a prefix
+# is orthogonal to the forge binding, so it prints even when the forge token is
+# malformed; every path that reads the forge binding (default, --forge, and
+# spawn's forge-agreement check) still refuses.
+# Usage: fm-project-mode.sh [--raw|--branch-prefix|--forge|--live-root|--live-policy] <project-name>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -104,14 +117,22 @@ REG="$DATA/projects.md"
 RAW=0
 BRANCH_PREFIX_QUERY=0
 WANT_FORGE=0
+LIVE_ROOT_QUERY=0
+LIVE_POLICY_QUERY=0
 case "${1:-}" in
   --raw) RAW=1; shift ;;
   --branch-prefix) BRANCH_PREFIX_QUERY=1; shift ;;
   --forge) WANT_FORGE=1; shift ;;
+  --live-root) LIVE_ROOT_QUERY=1; shift ;;
+  --live-policy) LIVE_POLICY_QUERY=1; shift ;;
 esac
-NAME=${1:?usage: fm-project-mode.sh [--raw|--branch-prefix|--forge] <project-name>}
+NAME=${1:?usage: fm-project-mode.sh [--raw|--branch-prefix|--forge|--live-root|--live-policy] <project-name>}
 
 if [ ! -f "$REG" ]; then
+  if [ "$LIVE_ROOT_QUERY" -eq 1 ] || [ "$LIVE_POLICY_QUERY" -eq 1 ]; then
+    echo "refused: no registry at $REG; $NAME is not registered live-sync" >&2
+    exit 3
+  fi
   echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2
   if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
     echo "fm/"
@@ -120,11 +141,13 @@ if [ ! -f "$REG" ]; then
 fi
 
 # awk emits one "near <token>" line per keyed token whose key is a near miss of
-# `forge`, then "posture <mode> <yolo> <branch-prefix> <forge>" (branch-prefix is
-# the raw prefix, defaulting to "fm/"; forge is `none` or the whole `forge=<value>`
-# token, so an empty value survives the split), or nothing if the project is
-# absent. Every other token beside the mode is ignored, exactly as before either
-# annotation existed.
+# `forge`, then "posture <mode> <yolo> <forge> <path> <policy> <branch-prefix>"
+# (branch-prefix is the raw prefix, defaulting to "fm/"; forge is `none` or the
+# whole `forge=<value>` token, so an empty value survives the split), or nothing
+# if the project is absent. Branch-prefix is printed LAST: an empty branch=
+# override must survive as an empty final field, which only holds when nothing
+# follows it. Every other token beside the mode is ignored, exactly as before
+# these annotations existed.
 parsed=$(awk -v n="$NAME" '
   function dist(x, y,   i, j, lx, ly, d, c, v) {
     lx = length(x); ly = length(y);
@@ -149,7 +172,7 @@ parsed=$(awk -v n="$NAME" '
     if (substr($0, 1, plen) != prefix) next
     after = substr($0, plen + 1);
     if (after != "" && substr(after, 1, 2) != " [" && substr(after, 1, 3) != " - ") next
-    mode="no-mistakes"; yolo="off"; branch="fm/"; forge="none";
+    mode="no-mistakes"; yolo="off"; branch="fm/"; forge="none"; live_path=""; live_policy="";
     if (substr(after, 1, 2) == " [") {
       s="";
       nk = split(after, rest, " ");
@@ -165,6 +188,8 @@ parsed=$(awk -v n="$NAME" '
         if (a[j]=="+yolo") { yolo="on"; continue }
         if (a[j] ~ /^branch=/) { branch = substr(a[j], 8); continue }
         if (a[j] ~ /^forge=/) { forge = a[j]; continue }
+        if (a[j] ~ /^path=/) { live_path = substr(a[j], 6); continue }
+        if (a[j] ~ /^policy=/) { live_policy = substr(a[j], 8); continue }
         if (a[j] ~ /^[^=]+=/) {
           key = substr(a[j], 1, index(a[j], "=") - 1);
           e = dist(key, "forge");
@@ -175,13 +200,17 @@ parsed=$(awk -v n="$NAME" '
         if (a[j] != "" && mode_set == 0) { mode = a[j]; mode_set = 1 }
       }
     }
-    # branch is printed LAST: an empty branch= override must survive as an
-    # empty final field, which only holds when nothing follows it.
-    print "posture", mode, yolo, forge, branch; exit
+    if (live_path == "") live_path = "__FM_EMPTY__";
+    if (live_policy == "") live_policy = "__FM_EMPTY__";
+    print "posture", mode, yolo, forge, live_path, live_policy, branch; exit
   }
 ' "$REG")
 
 if [ -z "$parsed" ]; then
+  if [ "$LIVE_ROOT_QUERY" -eq 1 ] || [ "$LIVE_POLICY_QUERY" -eq 1 ]; then
+    echo "refused: project \"$NAME\" is not registered live-sync in $REG" >&2
+    exit 3
+  fi
   echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2
   if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
     echo "fm/"
@@ -198,19 +227,41 @@ while IFS=' ' read -r kind rest; do
 done <<EOF
 $parsed
 EOF
-while IFS=' ' read -r m y f b; do
-  mode=$m; yolo=$y; rest_forge=$f; branch=$b
+while IFS=' ' read -r m y f lp lpol b; do
+  mode=$m; yolo=$y; rest_forge=$f; live_path=$lp; live_policy=$lpol; branch=$b
 done <<EOF
 $posture
 EOF
+[ "${live_path:-}" != __FM_EMPTY__ ] || live_path=
+[ "${live_policy:-}" != __FM_EMPTY__ ] || live_policy=
 forge=${rest_forge:-none}
 case "$mode" in
-  no-mistakes|direct-PR|local-only|no-mistakes-prod-only) ;;
+  no-mistakes|direct-PR|local-only|live-sync|no-mistakes-prod-only) ;;
   *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off; branch=fm/ ;;
 esac
 case "$yolo" in on|off) ;; *) yolo=off ;; esac
 if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
   echo "$branch"
+  exit 0
+fi
+if [ "$LIVE_ROOT_QUERY" -eq 1 ] || [ "$LIVE_POLICY_QUERY" -eq 1 ]; then
+  if [ "$mode" != live-sync ]; then
+    echo "refused: $NAME is registered mode=$mode, not live-sync" >&2
+    exit 3
+  fi
+  if [ "$LIVE_ROOT_QUERY" -eq 1 ]; then
+    if [ -z "$live_path" ]; then
+      echo "refused: live-sync project $NAME in $REG has no path=<absolute-root> token" >&2
+      exit 3
+    fi
+    echo "$live_path"
+  else
+    if [ -z "$live_policy" ]; then
+      echo "refused: live-sync project $NAME in $REG has no policy=<path> token; an explicit protection policy is required before real writes" >&2
+      exit 3
+    fi
+    echo "$live_policy"
+  fi
   exit 0
 fi
 
@@ -225,6 +276,14 @@ case "$forge" in
 esac
 if [ "$forge" != none ] && [ "$mode" = local-only ]; then
   echo "refused: $NAME is registered local-only with forge=$forge in $REG; local-only publishes nothing, so a forge has no meaning there, and its landing would fast-forward local main with content the review server has never seen; register no-mistakes or direct-PR to publish through the forge, or drop the forge token to keep the project local" >&2
+  exit 3
+fi
+if [ "$forge" != none ] && [ "$mode" = live-sync ]; then
+  echo "refused: $NAME is registered live-sync with forge=$forge in $REG; live-sync publishes nothing and edits its external directory directly, so a forge has no meaning there; drop the forge token" >&2
+  exit 3
+fi
+if [ "$mode" = live-sync ] && [ "$yolo" = on ]; then
+  echo "refused: +yolo is registered for live-sync project $NAME in $REG, but live-sync has no merge step; remove +yolo" >&2
   exit 3
 fi
 if [ "$WANT_FORGE" -eq 1 ]; then

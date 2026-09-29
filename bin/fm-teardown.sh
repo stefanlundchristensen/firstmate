@@ -69,6 +69,13 @@
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
+# live-sync ship tasks carve out of landed-work checks because the live root is
+# edited directly. Before their task record and scope lock are removed, teardown
+# must prove the recorded endpoint process group, captured descendants,
+# live-root cwd scan, and detached task-marker scan are quiescent. Missing
+# endpoint ownership, missing live root, missing lsof, or unavailable
+# process-environment proof is not quiescence: teardown refuses and retains the
+# task record plus state/live-sync-locks/<id>.lock.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
@@ -78,51 +85,43 @@
 # task state when that proof fails; otherwise it removes the task's check,
 # trust record, PR sidecar, and publication record with the rest of the
 # volatile state.
-# That volatile state includes the watcher's per-task .seen-* signature for
-# the task's turn-ended file, minted by bin/fm-wake-lib.sh (the .seen-*
-# signature for its status file and its .hb-surfaced- heartbeat marker are
-# already retired by status_retire_presentation_task) - and, once the
-# recorded pane is proven gone, an orphaned Herdr presentation journal: a
-# binding of exactly that pane, or a version 1 attempt whose
-# token-bearing projected workspace is itself confirmed gone, names nothing the
-# session-start sweep could still close, while a journal bound to any other pane
-# - or a version 1 attempt whose workspace is still present or unreadable - may
-# name a live quarantined space and is retained for that sweep.
-# data/<id>/ is deliberately left in place: a successor spawn reads brief.md
-# from it.
 # Worktree-slot ownership (teardown-slot-collision): a treehouse pool slot is
 # reused across tasks, so a stale, duplicated, or drifted worktree= record can
 # name a slot a DIFFERENT live task now holds. Cleanup kills every process under
 # that path and hard-resets it before returning it, so releasing a slot that is
 # not genuinely this task's destroys another worker's live work. Before the first
-# cleanup step, teardown verifies record exclusivity: no OTHER task record in
-# this home or any locally registered Firstmate home may name the same live path
-# in its worktree= or home=. One live path with two task records is the reuse
-# collision itself, whichever record is stale.
-# That scan alone cannot prove THIS record is the current owner, because the task
-# that took the slot next may leave no record it can reach - its own worker may
-# have exited and its record been cleaned up, or it may live in a home this
-# machine does not register - which is how a released-then-reassigned slot was
-# returned out from under a live worker (observed 2026-09-07). So teardown also
-# reads the slot's own owner claim, written by bin/fm-spawn.sh at the moment the
-# slot is taken and dropped here once it is genuinely returned; bin/fm-wake-lib.sh
-# owns the claim, its location, and its states. A claim naming another task is
-# proof of reassignment: the slot is no longer this task's, so teardown warns,
-# names the claimant, and then finishes only this task's own cleanup - endpoint,
-# status, records, checks, backlog - while every step that would read or touch
-# that slot is skipped: no process kill under it, no dirty or landed-work
-# inspection of it, no branch or hook removal in it, no Treehouse return, and
-# never the other task's claim. Skipping the inspection discards nothing of this
-# task's: whatever unlanded work it had in that slot was already destroyed when
-# the pool handed the slot on. Refusing instead would strand the record, because
-# bin/fm-backend.sh's endpoint validation refuses an empty or missing worktree=
-# unconditionally, so there is no line an operator could clear to get past it.
+# destructive slot step, teardown reads the slot's own owner claim, written by
+# bin/fm-spawn.sh at the moment the slot is taken and dropped here once it is
+# genuinely returned; bin/fm-wake-lib.sh owns the claim, its location, and its
+# states. A claim naming another task is proof of reassignment: the slot is no
+# longer this task's, so teardown warns, names the claimant, and then finishes
+# only this task's own cleanup - endpoint, status, records, checks, backlog -
+# while every step that would read or touch that slot is skipped: no process kill
+# under it, no dirty or landed-work inspection of it, no branch or hook removal
+# in it, no Treehouse return, and never the other task's claim. Skipping the
+# inspection discards nothing of this task's: whatever unlanded work it had in
+# that slot was already destroyed when the pool handed the slot on. Refusing
+# instead would strand the record, because bin/fm-backend.sh's endpoint
+# validation refuses an empty or missing worktree= unconditionally, so there is
+# no line an operator could clear to get past it.
+# When the claim is this task's or absent, teardown then verifies record
+# exclusivity: no OTHER task record in this home or any locally registered
+# Firstmate home may name the same live path in its worktree= or home=. One live
+# path with two task records is the reuse collision itself, whichever record is
+# stale. That scan alone cannot prove THIS record is the current owner, because
+# the task that took the slot next may leave no record it can reach - its own
+# worker may have exited and its record been cleaned up, or it may live in a home
+# this machine does not register - which is how a released-then-reassigned slot
+# was returned out from under a live worker (observed 2026-09-07).
 # A claim that cannot be read proves nothing either way and refuses; inspect or
 # repair the claim file at the printed path and re-run - never remove it, since
 # an absent claim proceeds and would return a slot that may be another task's. An
 # absent claim - a slot taken before claims existed, or already returned - keeps
 # exactly the record-scan protection it had before, because refusing it would
 # strand every task in flight across that change on no evidence at all.
+# A slot path recorded through an alias is returned with Treehouse's own recorded
+# absolute path only after the pool state, slot name, and Git common directory
+# match the task's recorded slot.
 # Why Treehouse's own state cannot answer this for crewmate slots, and why the
 # claim file sits on top of it, is owned by bin/fm-wake-lib.sh's slot-owner
 # claim comment.
@@ -339,7 +338,6 @@ for _teardown_source in \
   fm-cursor-lib.sh \
   fm-nm-run-lib.sh \
   fm-wake-lib.sh \
-  fm-path-lib.sh \
   fm-lease-lib.sh
 do
   teardown_require_source "$SCRIPT_DIR/$_teardown_source"
@@ -371,6 +369,8 @@ unset _teardown_source
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-live-sync-lib.sh
+. "$SCRIPT_DIR/fm-live-sync-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -512,9 +512,6 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
 }
 TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
-# Retiring a persistent secondmate is main's alone in both postures; the kind
-# is read under the metadata lock (role partition: bin/fm-lease-lib.sh).
-[ "$TEARDOWN_META_KIND" != secondmate ] || fm_lease_forbid_branch "secondmate retirement (fm-teardown)"
 # A secondmate's endpoint-liveness episodes (bin/fm-secondmate-liveness-lib.sh)
 # serialize on this lock; retirement holds it to the end so no probe or relaunch
 # can act on the route mid-teardown, and its relaunch ledger and park marker are
@@ -1063,7 +1060,6 @@ remote_secondmate_teardown() {
   status_retire_presentation_task "$STATE" "$ID" || return 1
   fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE" || return 1
   rm -f -- "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
-    "$(fm_wake_signal_seen_path "$STATE" "$STATE/$ID.turn-ended")" \
     "$STATE/.secondmate-relaunch-$ID" "$STATE/.secondmate-relaunch-bound-$ID"
   printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
   return 0
@@ -1127,6 +1123,7 @@ PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
+LIVE_SYNC_ROOT=$(fm_meta_get "$META" live_sync_root)
 BUSY_GEN=$(fm_meta_get "$META" busy_gen)
 if [ -z "$BUSY_GEN" ]; then
   BUSY_GEN=$(cat "$STATE/$ID.busy-gen" 2>/dev/null || true)
@@ -1613,6 +1610,8 @@ backlog_done_args() {
     *)
       if [ "$MODE" = local-only ]; then
         BACKLOG_DONE_ARGS=(--note "local main")
+      elif [ "$MODE" = live-sync ]; then
+        BACKLOG_DONE_ARGS=(--note "live sync")
       elif [ -n "$PR_URL" ]; then
         BACKLOG_DONE_ARGS=(--pr "$PR_URL")
       fi
@@ -1704,6 +1703,91 @@ canonical_existing_dir() {
   ( cd "$target" && pwd -P )
 }
 
+teardown_abs_git_common_dir() {  # <git-worktree>
+  local target=$1 common
+  common=$(git -C "$target" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  [ -n "$common" ] || return 1
+  ( cd "$common" && pwd -P )
+}
+
+teardown_treehouse_return_path() {  # <recorded-dir> <project-dir> <label>
+  local dir=$1 project=$2 label=$3 slot pool state slot_name paths count path
+  local state_pool state_file dir_common path_common
+  if ! fm_treehouse_pool_slot "$project" "$dir"; then
+    printf '%s\n' "$dir"
+    return 0
+  fi
+  slot=$(canonical_existing_dir "$dir") || {
+    echo "REFUSED: cannot canonicalize $label Treehouse slot ${dir:-<missing>}; nothing was changed" >&2
+    return 1
+  }
+  pool=$(dirname "$(dirname "$slot")")
+  state="$pool/treehouse-state.json"
+  [ -f "$state" ] && [ ! -L "$state" ] || {
+    echo "REFUSED: cannot read Treehouse state for $label slot $slot; nothing was changed" >&2
+    return 1
+  }
+  slot_name=$(basename "$(dirname "$slot")")
+  paths=$(perl -MJSON::PP -e '
+use strict;
+use warnings;
+my ($file, $name) = @ARGV;
+open my $fh, "<", $file or exit 2;
+local $/;
+my $data = eval { JSON::PP->new->decode(<$fh>) };
+exit 2 if $@ || ref($data) ne "HASH" || ref($data->{worktrees}) ne "ARRAY";
+for my $entry (@{$data->{worktrees}}) {
+  next unless ref($entry) eq "HASH";
+  next unless defined $entry->{name} && ! ref($entry->{name}) && "$entry->{name}" eq $name;
+  next unless defined $entry->{path} && ! ref($entry->{path});
+  print $entry->{path}, "\n";
+}
+' "$state" "$slot_name") || {
+    echo "REFUSED: cannot parse Treehouse state $state for $label slot $slot; nothing was changed" >&2
+    return 1
+  }
+  count=$(printf '%s\n' "$paths" | awk 'length($0) { c++ } END { print c + 0 }')
+  [ "$count" = 1 ] || {
+    echo "REFUSED: Treehouse state $state has $count paths for $label slot $slot_name; nothing was changed" >&2
+    return 1
+  }
+  path=$paths
+  case "$path" in
+    /*) ;;
+    *)
+      echo "REFUSED: Treehouse state $state records non-absolute path for $label slot $slot_name; nothing was changed" >&2
+      return 1
+      ;;
+  esac
+  [ -d "$path" ] || {
+    echo "REFUSED: Treehouse state $state records missing path $path for $label slot $slot_name; nothing was changed" >&2
+    return 1
+  }
+  state_pool=$(dirname "$(dirname "$path")")
+  state_file="$state_pool/treehouse-state.json"
+  [ -f "$state_file" ] && [ ! -L "$state_file" ] && [ "$state_file" -ef "$state" ] || {
+    echo "REFUSED: Treehouse state path $path for $label slot $slot_name does not belong to the verified pool; nothing was changed" >&2
+    return 1
+  }
+  [ "$(basename "$(dirname "$path")")" = "$slot_name" ] || {
+    echo "REFUSED: Treehouse state path $path does not name verified $label slot $slot_name; nothing was changed" >&2
+    return 1
+  }
+  dir_common=$(teardown_abs_git_common_dir "$dir") || {
+    echo "REFUSED: cannot resolve git identity for recorded $label slot $dir; nothing was changed" >&2
+    return 1
+  }
+  path_common=$(teardown_abs_git_common_dir "$path") || {
+    echo "REFUSED: cannot resolve git identity for Treehouse state path $path; nothing was changed" >&2
+    return 1
+  }
+  [ "$path_common" = "$dir_common" ] || {
+    echo "REFUSED: Treehouse state path $path does not match recorded $label slot $dir; nothing was changed" >&2
+    return 1
+  }
+  printf '%s\n' "$path"
+}
+
 retry_wait_secs_is_valid() {
   [[ "$1" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]
 }
@@ -1787,11 +1871,16 @@ cleanup_stale_lock_for_safety_check() {
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
-  local out lock attempt=0 max_retries lock_desc
+  local out lock attempt=0 max_retries lock_desc return_dir
+
+  return_dir=$(teardown_treehouse_return_path "$dir" "$cd_dir" "$label") || return 1
+  if [ "$return_dir" != "$dir" ]; then
+    echo "teardown: using Treehouse state path $return_dir for $label return (recorded path $dir)" >&2
+  fi
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
-  if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+  if out=$( ( cd "$cd_dir" && treehouse return --force "$return_dir" ) 2>&1 ); then
     [ -n "$out" ] && printf '%s\n' "$out"
     return 0
   fi
@@ -1816,7 +1905,7 @@ teardown_treehouse_return() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+    if out=$( ( cd "$cd_dir" && treehouse return --force "$return_dir" ) 2>&1 ); then
       [ -n "$out" ] && printf '%s\n' "$out"
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
       return 0
@@ -1843,7 +1932,7 @@ teardown_treehouse_return() {
           return 1
         fi
       fi
-      if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+      if out=$( ( cd "$cd_dir" && treehouse return --force "$return_dir" ) 2>&1 ); then
         [ -n "$out" ] && printf '%s\n' "$out"
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0
@@ -2103,8 +2192,23 @@ task_process_identity_matches() {  # <pid> <identity>
   [ "$current" = "$2" ]
 }
 
+task_pid_is_zombie() {  # <pid>
+  local stat
+  stat=$(ps -o stat= -p "$1" 2>/dev/null) || return 1
+  stat=$(printf '%s' "$stat" | tr -d '[:space:]')
+  case "$stat" in Z*) return 0 ;; *) return 1 ;; esac
+}
+
 task_pid_list_contains() {  # <pid-list> <pid>
   printf '%s\n' "$1" | grep -Fxq "$2"
+}
+
+task_pid_pgid() {  # <pid>
+  local pgid
+  pgid=$(ps -o pgid= -p "$1" 2>/dev/null) || return 1
+  pgid=$(printf '%s' "$pgid" | tr -d '[:space:]')
+  case "$pgid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+  printf '%s\n' "$pgid"
 }
 
 task_pids_under_roots() {  # <dir>...
@@ -2123,6 +2227,383 @@ $dir_pids"
   TASK_PIDS=$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un || true)
 }
 
+task_pids_in_pgid() {  # <pgid>
+  local pgid=$1
+  case "$pgid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+  ps -axo pid=,pgid= 2>/dev/null | awk -v want="$pgid" -v self="$$" '$2 == want && $1 != self { print $1 }' | sort -un
+}
+
+task_descendant_pids() {  # <root-pid>
+  local root=$1 rows
+  case "$root" in ''|*[!0-9]*|0|1) return 1 ;; esac
+  rows=$(ps -axo pid=,ppid= 2>/dev/null) || return 1
+  printf '%s\n' "$rows" | awk -v root="$root" -v self="$$" '
+    { pid[NR] = $1; ppid[NR] = $2 }
+    END {
+      want[root] = 1
+      changed = 1
+      while (changed) {
+        changed = 0
+        for (i = 1; i <= NR; i++) {
+          if ((ppid[i] in want) && !(pid[i] in want)) { want[pid[i]] = 1; changed = 1 }
+        }
+      }
+      for (i = 1; i <= NR; i++) {
+        if ((pid[i] in want) && pid[i] != root && pid[i] != self) print pid[i]
+      }
+    }' | sort -un
+}
+
+live_sync_capture_endpoint_owned_processes() {  # <root-pid>
+  local root=$1 pids pid identity
+  LIVE_SYNC_OWNERSHIP_CAPTURE_OK=0
+  LIVE_SYNC_CAPTURED_PIDS=()
+  LIVE_SYNC_CAPTURED_IDENTITIES=()
+  pids=$(task_descendant_pids "$root") || return 1
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    if ! identity=$(task_process_identity "$pid"); then
+      return 1
+    fi
+    LIVE_SYNC_CAPTURED_PIDS+=("$pid")
+    LIVE_SYNC_CAPTURED_IDENTITIES+=("$identity")
+  done <<EOF
+$pids
+EOF
+  LIVE_SYNC_OWNERSHIP_CAPTURE_OK=1
+}
+
+live_sync_capture_endpoint_process_group() {
+  local leader pgid own_pgid session pane info root_pid
+  LIVE_SYNC_ENDPOINT_PGID=
+  LIVE_SYNC_OWNERSHIP_CAPTURE_OK=0
+  LIVE_SYNC_CAPTURED_PIDS=()
+  LIVE_SYNC_CAPTURED_IDENTITIES=()
+  case "$BACKEND" in
+    tmux)
+      [ -n "${T:-}" ] || return 0
+      leader=$(tmux display-message -p -t "$T" '#{pane_pid}' 2>/dev/null) || leader=""
+      case "$leader" in ''|*[!0-9]*) return 0 ;; esac
+      pgid=$(task_pid_pgid "$leader") || return 0
+      root_pid=$leader
+      ;;
+    herdr)
+      [ -n "${T:-}" ] || return 0
+      fm_backend_source herdr || return 0
+      fm_backend_herdr_parse_target "$T" || return 0
+      session=$FM_BACKEND_HERDR_SESSION
+      pane=$FM_BACKEND_HERDR_PANE
+      info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 0
+      printf '%s' "$info" | jq -e --arg pane "$pane" '
+        .result.type == "pane_process_info"
+        and .result.process_info.pane_id == $pane
+      ' >/dev/null 2>&1 || return 0
+      pgid=$(printf '%s' "$info" | jq -er '
+        .result.process_info.foreground_process_group_id
+        | select(type == "number" and . > 1) | floor
+      ' 2>/dev/null) || return 0
+      root_pid=$(printf '%s' "$info" | jq -er '
+        .result.process_info.shell_pid
+        | select(type == "number" and . > 1) | floor
+      ' 2>/dev/null) || return 0
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+  own_pgid=$(task_pid_pgid "$$") || own_pgid=
+  [ -z "$own_pgid" ] || [ "$pgid" != "$own_pgid" ] || return 0
+  LIVE_SYNC_ENDPOINT_PGID=$pgid
+  live_sync_capture_endpoint_owned_processes "$root_pid" || LIVE_SYNC_OWNERSHIP_CAPTURE_OK=0
+}
+
+live_sync_refuse_lingering_processes() {  # <reason>
+  echo "REFUSED: live-sync task $ID still has process ownership that cannot be proven stopped ($1); retaining its scope lock and durable task record." >&2
+  return 1
+}
+
+live_sync_scan_owned_pids() {  # <pgid|root>
+  case "$1" in
+    pgid) task_pids_in_pgid "$LIVE_SYNC_ENDPOINT_PGID" ;;
+    root)
+      task_pids_under_roots "$LIVE_SYNC_ROOT" || return 1
+      printf '%s\n' "$TASK_PIDS"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+live_sync_reap_endpoint_pids() {  # <pid-list> <scan-kind>
+  local pids=$1 scan_kind=$2 pid identity i current_pids pass=1 max_passes=3
+  local -a tracked_pids tracked_identities remaining_pids remaining_identities
+  while [ "$pass" -le "$max_passes" ]; do
+    pids=$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un || true)
+    [ -n "$pids" ] || return 0
+    tracked_pids=()
+    tracked_identities=()
+    while IFS= read -r pid; do
+      [ -n "$pid" ] || continue
+      if [ "$(task_pid_pgid "$pid" 2>/dev/null || true)" != "$LIVE_SYNC_ENDPOINT_PGID" ]; then
+        live_sync_refuse_lingering_processes "process $pid no longer belongs to the endpoint process group"
+        return 1
+      fi
+      if ! identity=$(task_process_identity "$pid"); then
+        live_sync_refuse_lingering_processes "cannot verify process $pid identity"
+        return 1
+      fi
+      tracked_pids+=("$pid")
+      tracked_identities+=("$identity")
+    done <<EOF
+$pids
+EOF
+    echo "teardown: reaping leaked live-sync process(es) for $ID: $(printf '%s' "$pids" | tr '\n' ' ')" >&2
+    current_pids=$(live_sync_scan_owned_pids "$scan_kind") || {
+      live_sync_refuse_lingering_processes "process ownership scan failed"
+      return 1
+    }
+    for i in "${!tracked_pids[@]}"; do
+      pid=${tracked_pids[$i]}
+      identity=${tracked_identities[$i]}
+      if task_pid_list_contains "$current_pids" "$pid" \
+         && task_process_identity_matches "$pid" "$identity" \
+         && [ "$(task_pid_pgid "$pid" 2>/dev/null || true)" = "$LIVE_SYNC_ENDPOINT_PGID" ]; then
+        kill -TERM "$pid" 2>/dev/null || true
+      fi
+    done
+    sleep 1
+    remaining_pids=()
+    remaining_identities=()
+    current_pids=$(live_sync_scan_owned_pids "$scan_kind") || {
+      live_sync_refuse_lingering_processes "process ownership scan failed"
+      return 1
+    }
+    for i in "${!tracked_pids[@]}"; do
+      pid=${tracked_pids[$i]}
+      identity=${tracked_identities[$i]}
+      if task_pid_list_contains "$current_pids" "$pid" \
+         && task_process_identity_matches "$pid" "$identity" \
+         && [ "$(task_pid_pgid "$pid" 2>/dev/null || true)" = "$LIVE_SYNC_ENDPOINT_PGID" ]; then
+        remaining_pids+=("$pid")
+        remaining_identities+=("$identity")
+      fi
+    done
+    if [ "${#remaining_pids[@]}" -gt 0 ]; then
+      echo "teardown: force-killing leaked live-sync process(es) for $ID: ${remaining_pids[*]}" >&2
+      for i in "${!remaining_pids[@]}"; do
+        pid=${remaining_pids[$i]}
+        identity=${remaining_identities[$i]}
+        if task_process_identity_matches "$pid" "$identity" \
+           && [ "$(task_pid_pgid "$pid" 2>/dev/null || true)" = "$LIVE_SYNC_ENDPOINT_PGID" ]; then
+          kill -KILL "$pid" 2>/dev/null || true
+        fi
+      done
+    fi
+    pids=$(live_sync_scan_owned_pids "$scan_kind") || {
+      live_sync_refuse_lingering_processes "process ownership scan failed"
+      return 1
+    }
+    pass=$((pass + 1))
+  done
+  [ -z "$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un || true)" ] && return 0
+  live_sync_refuse_lingering_processes "process(es) remain in endpoint process group"
+}
+
+live_sync_ps_env_available() {
+  local token out probe_pid status=1
+  [ "${FM_LIVE_SYNC_PS_ENV_PROOF_OVERRIDE:-1}" != 0 ] || return 1
+  token="fm-live-sync-proof-${BASHPID:-$$}-$RANDOM"
+  FM_LIVE_SYNC_PS_ENV_PROBE=$token "${BASH:-bash}" -c 'sleep 5' >/dev/null 2>&1 &
+  probe_pid=$!
+  out=$(ps -p "$probe_pid" -wwE -o command= 2>/dev/null) || out=
+  case "$out" in *"FM_LIVE_SYNC_PS_ENV_PROBE=$token"*) status=0 ;; esac
+  kill "$probe_pid" 2>/dev/null || true
+  wait "$probe_pid" 2>/dev/null || true
+  return "$status"
+}
+
+live_sync_ps_env_marker_pids() {  # <task-id> <live-root>
+  local marker_id=$1 marker_root=$2
+  ps -axo pid=,stat= -wwE -o command= 2>/dev/null | awk -v self="$$" -v id="$marker_id" -v root="$marker_root" '
+    {
+      pid = $1
+      stat = $2
+      line = $0
+      sub(/^[[:space:]]*[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+/, "", line)
+      if (pid == self || pid == "" || stat ~ /^Z/) next
+      if (id != "" && index(line, "FM_TASK_ID=" id) > 0) print pid
+      else if (root != "" && index(line, "LIVE_SYNC_ROOT=" root) > 0) print pid
+      else if (root != "" && index(line, "=" root) > 0) print pid
+    }'
+}
+
+live_sync_marker_pids() {
+  local marker_root=${LIVE_SYNC_ROOT:-} marker_id=${ID:-} proc_root=${FM_LIVE_SYNC_PROC_ROOT_OVERRIDE:-/proc} argv_pids env_pids pid env_file env ps_env_pids
+  LIVE_SYNC_ENV_PROOF_AVAILABLE=0
+  argv_pids=$(ps -axo pid=,stat=,args= 2>/dev/null | awk -v self="$$" -v id="$marker_id" '
+    {
+      pid = $1
+      stat = $2
+      line = $0
+      sub(/^[[:space:]]*[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+/, "", line)
+      if (pid == self || pid == "" || stat ~ /^Z/) next
+      if (index(line, "LIVE_SYNC_ROOT") > 0) print pid
+      else if (id != "" && index(line, "FM_TASK_ID=" id) > 0) print pid
+    }') || return 1
+  env_pids=
+  if [ -d "$proc_root" ]; then
+    LIVE_SYNC_ENV_PROOF_AVAILABLE=1
+    while IFS= read -r pid; do
+      [ -n "$pid" ] || continue
+      env_file=$proc_root/$pid/environ
+      [ -r "$env_file" ] || continue
+      env=$(tr '\0' '\n' < "$env_file" 2>/dev/null) || continue
+      if { [ -n "$marker_id" ] && printf '%s\n' "$env" | grep -Fxq "FM_TASK_ID=$marker_id"; } \
+         || { [ -n "$marker_root" ] && printf '%s\n' "$env" | grep -Fqx "LIVE_SYNC_ROOT=$marker_root"; } \
+         || { [ -n "$marker_root" ] && printf '%s\n' "$env" | grep -Fq "=$marker_root"; }; then
+        env_pids="$env_pids
+$pid"
+      fi
+    done <<EOF
+$(ps -axo pid= 2>/dev/null | tr -d ' ')
+EOF
+  elif live_sync_ps_env_available && ps_env_pids=$(live_sync_ps_env_marker_pids "$marker_id" "$marker_root"); then
+    LIVE_SYNC_ENV_PROOF_AVAILABLE=1
+    env_pids=$ps_env_pids
+  fi
+  LIVE_SYNC_MARKER_PIDS=$(printf '%s\n%s\n' "$argv_pids" "$env_pids" | grep -E '^[0-9]+$' | sort -un || true)
+}
+
+live_sync_require_no_marker_pids() {
+  local pids
+  if ! live_sync_marker_pids; then
+    live_sync_refuse_lingering_processes "process marker scan failed"
+    return 1
+  fi
+  pids=$LIVE_SYNC_MARKER_PIDS
+  if [ -n "$pids" ]; then
+    live_sync_refuse_lingering_processes "possible detached task-owned writer process(es): $(printf '%s' "$pids" | tr '\n' ' ')"
+    return 1
+  fi
+  if [ "${LIVE_SYNC_ENV_PROOF_AVAILABLE:-0}" != 1 ]; then
+    live_sync_refuse_lingering_processes "process environment ownership cannot be inspected"
+    return 1
+  fi
+}
+
+live_sync_reap_captured_owned_processes() {
+  local i pid identity remaining=() remaining_identity=()
+  [ "${LIVE_SYNC_OWNERSHIP_CAPTURE_OK:-0}" = 1 ] || {
+    live_sync_refuse_lingering_processes "endpoint descendant ownership could not be captured"
+    return 1
+  }
+  [ "${#LIVE_SYNC_CAPTURED_PIDS[@]}" -gt 0 ] || return 0
+  echo "teardown: reaping captured live-sync descendant process(es) for $ID: ${LIVE_SYNC_CAPTURED_PIDS[*]}" >&2
+  for i in "${!LIVE_SYNC_CAPTURED_PIDS[@]}"; do
+    pid=${LIVE_SYNC_CAPTURED_PIDS[$i]}
+    identity=${LIVE_SYNC_CAPTURED_IDENTITIES[$i]}
+    if task_process_identity_matches "$pid" "$identity"; then
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+  done
+  sleep 1
+  for i in "${!LIVE_SYNC_CAPTURED_PIDS[@]}"; do
+    pid=${LIVE_SYNC_CAPTURED_PIDS[$i]}
+    identity=${LIVE_SYNC_CAPTURED_IDENTITIES[$i]}
+    if task_process_identity_matches "$pid" "$identity"; then
+      remaining+=("$pid")
+      remaining_identity+=("$identity")
+    fi
+  done
+  if [ "${#remaining[@]}" -gt 0 ]; then
+    echo "teardown: force-killing captured live-sync descendant process(es) for $ID: ${remaining[*]}" >&2
+    for i in "${!remaining[@]}"; do
+      pid=${remaining[$i]}
+      identity=${remaining_identity[$i]}
+      if task_process_identity_matches "$pid" "$identity"; then
+        kill -KILL "$pid" 2>/dev/null || true
+      fi
+    done
+  fi
+  sleep 0.1
+  for i in "${!LIVE_SYNC_CAPTURED_PIDS[@]}"; do
+    pid=${LIVE_SYNC_CAPTURED_PIDS[$i]}
+    identity=${LIVE_SYNC_CAPTURED_IDENTITIES[$i]}
+    if task_process_identity_matches "$pid" "$identity" && ! task_pid_is_zombie "$pid"; then
+      live_sync_refuse_lingering_processes "captured descendant process $pid remains live"
+      return 1
+    fi
+  done
+  return 0
+}
+
+live_sync_require_no_lingering_processes() {
+  local pids pid pgid owned_pids uncertain_pids endpoint_pids
+  if [ -z "${LIVE_SYNC_ENDPOINT_PGID:-}" ]; then
+    live_sync_refuse_lingering_processes "endpoint process group ownership was not captured"
+    return 1
+  fi
+  live_sync_reap_captured_owned_processes || return 1
+  endpoint_pids=$(task_pids_in_pgid "$LIVE_SYNC_ENDPOINT_PGID") || {
+    live_sync_refuse_lingering_processes "endpoint process group scan failed"
+    return 1
+  }
+  if [ -n "$endpoint_pids" ]; then
+    live_sync_reap_endpoint_pids "$endpoint_pids" pgid || return 1
+  fi
+  if [ -z "${LIVE_SYNC_ROOT:-}" ] || [ ! -d "$LIVE_SYNC_ROOT" ]; then
+    live_sync_refuse_lingering_processes "live root is unavailable"
+    return 1
+  fi
+  if ! command -v lsof >/dev/null 2>&1; then
+    live_sync_refuse_lingering_processes "lsof unavailable"
+    return 1
+  fi
+  if ! task_pids_under_roots "$LIVE_SYNC_ROOT"; then
+    live_sync_refuse_lingering_processes "lsof failed"
+    return 1
+  fi
+  pids=$TASK_PIDS
+  if [ -z "$pids" ]; then
+    live_sync_require_no_marker_pids || return 1
+    return 0
+  fi
+  owned_pids=
+  uncertain_pids=
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    pgid=$(task_pid_pgid "$pid" 2>/dev/null) || pgid=
+    if [ "$pgid" = "$LIVE_SYNC_ENDPOINT_PGID" ]; then
+      owned_pids="$owned_pids
+$pid"
+    else
+      uncertain_pids="$uncertain_pids
+$pid"
+    fi
+  done <<EOF
+$pids
+EOF
+  uncertain_pids=$(printf '%s\n' "$uncertain_pids" | grep -E '^[0-9]+$' | sort -un || true)
+  if [ -n "$uncertain_pids" ]; then
+    live_sync_refuse_lingering_processes "unattributed process(es) under live root: $(printf '%s' "$uncertain_pids" | tr '\n' ' ')"
+    return 1
+  fi
+  owned_pids=$(printf '%s\n' "$owned_pids" | grep -E '^[0-9]+$' | sort -un || true)
+  if [ -z "$owned_pids" ]; then
+    live_sync_require_no_marker_pids || return 1
+    return 0
+  fi
+  live_sync_reap_endpoint_pids "$owned_pids" root || return 1
+  if ! task_pids_under_roots "$LIVE_SYNC_ROOT"; then
+    live_sync_refuse_lingering_processes "lsof failed"
+    return 1
+  fi
+  if [ -z "$TASK_PIDS" ]; then
+    live_sync_require_no_marker_pids || return 1
+    return 0
+  fi
+  live_sync_refuse_lingering_processes "process(es) remain under live root"
+}
+
 reap_task_backend_process_group() {  # <label>
   local label=$1 leader leader_start pgid current_pgid own_pgid
   if [ "$BACKEND" != tmux ]; then
@@ -2139,15 +2620,13 @@ reap_task_backend_process_group() {  # <label>
     echo "warning: lsof is unavailable; cannot identify the tmux pane process group for $ID" >&2
     return 0
   }
-  pgid=$(ps -o pgid= -p "$leader" 2>/dev/null) || pgid=""
-  pgid=$(printf '%s' "$pgid" | tr -d '[:space:]')
-  case "$pgid" in ''|*[!0-9]*|0|1)
+  pgid=$(task_pid_pgid "$leader") || pgid=""
+  case "$pgid" in '')
     echo "warning: lsof is unavailable; cannot resolve the tmux pane process group for $ID" >&2
     return 0
     ;;
   esac
-  own_pgid=$(ps -o pgid= -p "$$" 2>/dev/null) || own_pgid=""
-  own_pgid=$(printf '%s' "$own_pgid" | tr -d '[:space:]')
+  own_pgid=$(task_pid_pgid "$$" 2>/dev/null) || own_pgid=""
   if [ "$pgid" = "$own_pgid" ]; then
     echo "warning: lsof is unavailable; refusing to signal teardown's own process group for $ID" >&2
     return 0
@@ -2303,6 +2782,7 @@ require_orca_worktree_path_match_if_present() {
 # record with nothing live to return skips them rather than refusing.
 teardown_live_slot_path() {
   [ "$KIND" != secondmate ] || return 1
+  [ "$MODE" != live-sync ] || return 1
   fm_treehouse_pool_slot "$PROJ" "$WT" || return 1
   canonical_existing_dir "$WT"
 }
@@ -2383,6 +2863,7 @@ require_exclusive_worktree_slot_record() {
 
 require_exclusive_task_worktree_slot() {
   local slot
+  teardown_owns_worktree || return 0
   slot=$(teardown_live_slot_path) || return 0
   require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$slot"
 }
@@ -2390,14 +2871,11 @@ require_exclusive_task_worktree_slot() {
 # Positive slot ownership, read from the claim the task that took the slot wrote
 # into the slot itself (bin/fm-wake-lib.sh owns the claim and its states).
 #
-# The record scan above proves that no OTHER task record names this slot. It
-# cannot prove that THIS record is not the stale one, because the task that took
-# the slot next may leave no record this scan can reach: its own worker may have
-# exited and its record been cleaned up, or it may belong to a home this machine
-# does not register. The claim closes that gap from the other side - it names the
-# task that actually took the slot, and it is written under the same project lock
-# that allocates it - so a claim naming another task is proof the slot was
-# reassigned after this record was written.
+# The claim is checked before the record scan. A claim naming another task is
+# already proof this record is stale and must skip every slot step, even when the
+# claimant also has a visible task record. A claim for this task, or no claim at
+# all, still goes on to the record scan so a visible duplicate task record can
+# refuse before any destructive step.
 #
 # A claim naming another task does not refuse: it means the slot is no longer
 # this task's, so the record's own cleanup proceeds and every slot step is
@@ -2973,13 +3451,14 @@ preflight_descendant_treehouse_slots() {
       continue
     fi
     fm_backend_validate_task_endpoint "$meta" "$task_id" || return 1
-    require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1
     owner_rc=0
     require_owned_worktree_slot_record "$task_id" "$worktree" || owner_rc=$?
     case "$owner_rc" in
-      0|"$TEARDOWN_SLOT_REASSIGNED_RC") ;;
+      0) ;;
+      "$TEARDOWN_SLOT_REASSIGNED_RC") continue ;;
       *) return 1 ;;
     esac
+    require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1
   done
 }
 
@@ -3296,7 +3775,6 @@ cleanup_firstmate_home_children() {
     fm_wake_queue_prune_task "$sub_state" "$child_id" "$child_t" 2>/dev/null || true
     fm_backlog_atomic_transition remove "$sub_state/$child_id.meta" "task record" "$sub_state" || return 1
     rm -f "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.progress" \
-      "$(fm_wake_signal_seen_path "$sub_state" "$sub_state/$child_id.turn-ended")" \
       "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.omp-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
@@ -3323,8 +3801,8 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
-require_exclusive_task_worktree_slot || exit 1
 require_owned_task_worktree_slot || exit 1
+require_exclusive_task_worktree_slot || exit 1
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
@@ -3424,7 +3902,7 @@ if [ -n "$X_REQUEST" ]; then
   echo "warning: task $ID still carries an unreconciled Relay request link ($X_REQUEST) on its task record." >&2
 fi
 
-if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
+if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != live-sync ] && [ "$FORCE" != "--force" ]; then
   if ! inspectable_git_worktree "$WT"; then
     echo "REFUSED: Orca ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
     echo "Cannot verify dirty or unlanded work; restore the worktree path or get explicit OK to discard, then --force." >&2
@@ -3434,7 +3912,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+if [ "$MODE" != live-sync ] && teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
     :
   else
@@ -3549,7 +4027,10 @@ fi
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
-if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
+if [ "$KIND" != secondmate ] && [ "$MODE" = live-sync ]; then
+  live_sync_capture_endpoint_process_group
+  reap_task_worktree_processes tasktmp "$TASK_TMP"
+elif [ "$KIND" != secondmate ] && teardown_owns_worktree; then
   conclude_task_no_mistakes_run "$WT"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 elif [ "$KIND" != secondmate ]; then
@@ -3584,6 +4065,8 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
+elif [ "$KIND" != secondmate ] && [ "$MODE" = live-sync ]; then
+  :
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
@@ -3614,22 +4097,6 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
-# teardown_herdr_journal_orphaned: true when the task's own journal names
-# nothing the session-start sweep could still close - a version 1 attempt whose
-# token-bearing projected workspace is confirmed gone, or a version 2 binding of
-# exactly the recorded pane this teardown proves gone. Unreadable, malformed, or
-# otherwise-bound journals, and a version 1 workspace still present or
-# unreadable, are not orphans.
-teardown_herdr_journal_orphaned() {
-  fm_backend_source herdr || return 1
-  fm_backend_herdr_projection_journal_snapshot "$HERDR_PRESENTATION_JOURNAL" "$ID" || return 1
-  if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 1 ]; then
-    fm_backend_herdr_projection_token_workspace_gone \
-      "$TEARDOWN_HERDR_SESSION" "$HERDR_PRESENTATION_JOURNAL" "$ID"
-  else
-    [ "$FM_BACKEND_HERDR_JOURNAL_SESSION:$FM_BACKEND_HERDR_JOURNAL_PANE_ID" = "$T" ]
-  fi
-}
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
 HERDR_PRESENTATION_SESSION=
 HERDR_PRESENTATION_PANE=
@@ -3648,6 +4115,10 @@ if [ "$BACKEND" = herdr ] \
        "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
     HERDR_PRESENTATION_RETIRE_CANDIDATE=1
   fi
+fi
+
+if [ "$KIND" != secondmate ] && [ "$MODE" = live-sync ]; then
+  live_sync_require_no_lingering_processes || exit 1
 fi
 
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
@@ -3685,7 +4156,7 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   fi
 elif [ "$BACKEND" = herdr ] \
      && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
-  echo "warning: herdr presentation journal for $ID was not retired by its close; no workspace cleanup was attempted" >&2
+  echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
 fi
 # A refused, skipped, or failed Herdr close must never erase a live task's
 # durable endpoint identity: unless the exact pane is confirmed gone, retain
@@ -3768,7 +4239,6 @@ retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
 fm_wake_queue_prune_task "$STATE" "$ID" "$T" 2>/dev/null || true
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
-  "$(fm_wake_signal_seen_path "$STATE" "$STATE/$ID.turn-ended")" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
@@ -3784,16 +4254,12 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
 # read-only by its installer.
 chmod u+w "$STATE/$ID.git-hooks" 2>/dev/null || true
 rm -rf "$STATE/$ID.inbox" "$STATE/$ID.git-hooks"
-# A presentation journal the close path left behind is orphaned once the
-# recorded pane is proven gone (the Herdr gate above) unless it still names a
-# live projected workspace - a version 2 binding of some other pane, or a
-# version 1 attempt whose token-bearing workspace is still present - which the
-# session-start sweep alone may judge (header).
-if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
-  if teardown_herdr_journal_orphaned; then
-    rm -f "$HERDR_PRESENTATION_JOURNAL"
-  else
-    echo "warning: retaining herdr presentation journal for $ID; it still names a projected workspace the session-start sweep owns, not the closed endpoint" >&2
+if [ "$KIND" != secondmate ] && [ "$MODE" = live-sync ]; then
+  if ! fm_live_sync_release_task "$STATE" "$ID"; then
+    fm_lock_release "$META_LOCK"
+    META_LOCK_HELD=0
+    echo "error: $ID's endpoint and live-root writers are cleaned up, but its live-sync scope lock could not be released; retaining its task record so teardown can retry" >&2
+    exit 1
   fi
 fi
 # The record is gone, so the backlog must not still show this task in flight
@@ -3829,7 +4295,7 @@ else
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
-if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
+if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ] && [ "$MODE" != live-sync ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
 # A secondmate retirement may remove the home containing an overridden control
