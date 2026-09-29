@@ -744,6 +744,59 @@ test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
   pass "teardown honors config/backlog-backend=manual and still finishes cleanly"
 }
 
+write_live_sync_teardown_process_stubs() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *'#{pane_pid}'*) printf '99999\n'; exit 0 ;;
+  *'#{pane_current_path}'*) printf '%s\n' "$PWD"; exit 0 ;;
+  *'#S'*) printf 'firstmate\n'; exit 0 ;;
+  *'#{pane_id}'*) printf '%%pane\n'; exit 0 ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  '-o pgid= -p 99999') printf '4242\n'; exit 0 ;;
+  '-o pgid= -p '*) printf '5555\n'; exit 0 ;;
+  '-p 99999 -o lstart=') printf 'Mon Jan  1 00:00:00 2024\n'; exit 0 ;;
+  '-axo pid=,pgid='|'-axo pid=,ppid='|'-axo pid=,stat=,args='|'-axo pid='|'-axo pid=,stat= -wwE -o command=') exit 0 ;;
+  '-p '*'-wwE -o command=') printf 'FM_LIVE_SYNC_PS_ENV_PROBE=%s\n' "${FM_LIVE_SYNC_PS_ENV_PROBE:-}"; exit 0 ;;
+  '-o stat= -p '*) exit 1 ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux" "$case_dir/fakebin/ps" "$case_dir/fakebin/lsof"
+}
+
+test_live_sync_teardown_closes_the_backlog_item_itself() {
+  local case_dir live_root out
+  case_dir=$(make_case live-sync-tasks-axi-close)
+  live_root="$case_dir/live-root"
+  mkdir -p "$live_root"
+  write_meta "$case_dir" live-sync ship
+  printf 'live_sync_root=%s\n' "$live_root" >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  write_live_sync_teardown_process_stubs "$case_dir"
+
+  mkdir -p "$case_dir/proc"
+  out=$(FM_TEARDOWN_GUARD_DONE=1 FM_LIVE_SYNC_PROC_ROOT_OVERRIDE="$case_dir/proc" run_teardown "$case_dir") \
+    || fail "live-sync teardown failed with a real backlog: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "live-sync teardown returned success while its backlog item was still open: $(backlog_row_state "$case_dir")"
+  assert_grep 'live sync' "$case_dir/data/backlog.md" \
+    "closed live-sync backlog item did not record its completion note"
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "a completed live-sync close left its pending-close record behind"
+  pass "live-sync teardown closes its own backlog item before reporting success"
+}
+
 test_local_only_truly_unpushed_refuses() {
   local case_dir rc
   case_dir=$(make_case truly-unpushed)
@@ -4253,6 +4306,7 @@ test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
+test_live_sync_teardown_closes_the_backlog_item_itself
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
