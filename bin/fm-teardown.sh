@@ -70,12 +70,11 @@
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
 # live-sync ship tasks carve out of landed-work checks because the live root is
-# edited directly. Before their task record and scope lock are removed, teardown
-# must prove the recorded endpoint process group, captured descendants,
-# live-root cwd scan, and detached task-marker scan are quiescent. Missing
-# endpoint ownership, missing live root, missing lsof, or unavailable
-# process-environment proof is not quiescence: teardown refuses and retains the
-# task record plus state/live-sync-locks/<id>.lock.
+# edited directly. Before their task record is removed, teardown must prove the
+# recorded endpoint process group, captured descendants, live-root cwd scan, and
+# detached task-marker scan are quiescent. Missing endpoint ownership, missing
+# live root, missing lsof, or unavailable process-environment proof is not
+# quiescence: teardown refuses and retains the task record.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
@@ -369,8 +368,6 @@ unset _teardown_source
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
-# shellcheck source=bin/fm-live-sync-lib.sh
-. "$SCRIPT_DIR/fm-live-sync-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -2318,7 +2315,7 @@ live_sync_capture_endpoint_process_group() {
 }
 
 live_sync_refuse_lingering_processes() {  # <reason>
-  echo "REFUSED: live-sync task $ID still has process ownership that cannot be proven stopped ($1); retaining its scope lock and durable task record." >&2
+  echo "REFUSED: live-sync task $ID still has process ownership that cannot be proven stopped ($1); retaining its durable task record." >&2
   return 1
 }
 
@@ -4254,14 +4251,6 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
 # read-only by its installer.
 chmod u+w "$STATE/$ID.git-hooks" 2>/dev/null || true
 rm -rf "$STATE/$ID.inbox" "$STATE/$ID.git-hooks"
-if [ "$KIND" != secondmate ] && [ "$MODE" = live-sync ]; then
-  if ! fm_live_sync_release_task "$STATE" "$ID"; then
-    fm_lock_release "$META_LOCK"
-    META_LOCK_HELD=0
-    echo "error: $ID's endpoint and live-root writers are cleaned up, but its live-sync scope lock could not be released; retaining its task record so teardown can retry" >&2
-    exit 1
-  fi
-fi
 # The record is gone, so the backlog must not still show this task in flight
 # when teardown reports success. Still under this task's meta lock, so a steer
 # racing the same id stays serialized exactly as it was before. A captain-held

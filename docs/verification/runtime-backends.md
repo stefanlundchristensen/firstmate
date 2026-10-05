@@ -107,6 +107,30 @@ A single-process harness has no descendant that adds a distinct verdict, which i
 The portable regression pins every half without any harness installed: `tests/fm-harness-precedence.test.sh` asserts that this two-process topology decides at comm strength, that the descent probe reaches a strength the top-of-session probe cannot, that a sibling branch answering a foreign harness contributes no verdict, that a foreign args-only verdict at the deepest vantage leaves the comm-strength identity intact, and that equal-depth ties choose the comm-strength leaf regardless of process ordering.
 The run did not reach `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, or `muse`, which were not installed, and stopped at the same pre-existing liveness failure for `cursor` 3.18.9, whose resolved binary on that machine is the editor rather than `cursor-agent`; those adapters are unverified by this run.
 
+## Live-sync policy without file reservations
+
+Verified on 2026-10-05 on macOS with Bash 5.3.15 and tasks-axi 0.2.6:
+
+```sh
+bin/fm-test-run.sh tests/fm-live-sync.test.sh tests/fm-live-sync-teardown.test.sh --jobs 1
+```
+
+Selected output from the passing 16-case pair:
+
+```text
+ok - fm-spawn: overlapping live scopes launch without reservations; historical evidence stays inert and protected paths still refuse
+ok - fm-spawn: live-sync post-launch backlog failures keep teardown-owned state
+ok - live-sync teardown stops owned writers before retiring the record and leaves historical reservations inert
+ok - live-sync teardown retains the record when endpoint ownership is missing
+FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=33587
+```
+
+All backend responses are private fixtures; shutdown cases exercise their own kernel-process groups, not a real terminal lifecycle.
+The five policy/dispatch cases also passed under stock macOS Bash 3.2.57.
+The shared pre-dispatch policy check remains backend-independent, and no backend adapter or vendor-emitted harness signal changed.
+These tests verify the absence of cross-task file reservation, preservation of inert historical records, and retained forbidden-path and ordinary shutdown behavior; they do not claim concurrent live edits are protected.
+`bin/fm-live-sync-lib.sh`, `bin/fm-spawn.sh`, and `bin/fm-teardown.sh` own the current boundaries.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.

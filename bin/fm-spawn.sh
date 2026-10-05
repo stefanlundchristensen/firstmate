@@ -33,8 +33,8 @@
 #   refused as a flag value. live-sync is a task mode only for projects
 #   registered as live-sync in data/projects.md; the project argument is the
 #   registry name, --live-scope is required at least once, --yolo must be off,
-#   no branch is created, and scope locks are held until teardown proves the
-#   task has no remaining live-root writer or retains the task record and lock.
+#   and no branch is created. Teardown retains the task record until its ordinary
+#   shutdown proof succeeds; live files are not reserved against other workers.
 #   --branch-prefix is the optional prefix selected at intake for this ship's
 #   immutable branch, defaulting to "fm/". It must agree with the branch recorded
 #   in the brief, and is refused on live-sync, scouts, secondmates, and relaunches.
@@ -43,10 +43,9 @@
 #   prefix is the captain's standing preference and the brief agreement above
 #   already guarantees the worker's instructions match the branch.
 #   --live-scope declares one write scope for a live-sync task and may repeat.
-#   Each scope is validated against the registered live root and protection policy
-#   and then locked durably against overlapping live-sync tasks. Disjoint declared
-#   scopes may launch concurrently. This is not a same-user filesystem sandbox;
-#   it serializes declarations and the brief binds the worker's actual writes.
+#   Each scope is validated against the registered live root and protection policy.
+#   Overlapping live-sync tasks are not excluded; firstmate must assign
+#   non-conflicting work. The brief binds actual writes, not a filesystem sandbox.
 #   Ship/scout launches always put fm-dod-lib.sh's current worker role scope
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
@@ -1246,8 +1245,6 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
-SPAWN_LIVE_SYNC_LOCK_ACQUIRED=0
-SPAWN_LIVE_SYNC_LOCK_PUBLISHED=0
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1378,17 +1375,6 @@ spawn_abort_cleanup() {
     if ! spawn_fresh_commit_rollback; then
       status=1
     fi
-  fi
-  if [ "$SPAWN_LIVE_SYNC_LOCK_ACQUIRED" = 1 ] &&
-    { [ "$SPAWN_LAUNCH_SENT" = 0 ] || [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; } &&
-    [ "$RELAUNCH" -eq 0 ] && [ "$SPAWN_LIVE_SYNC_LOCK_PUBLISHED" != 1 ]; then
-    SPAWN_LIVE_SYNC_LOCK_ACQUIRED=0
-    fm_live_sync_release_task "$STATE" "$ID" || true
-  elif [ "$SPAWN_LIVE_SYNC_LOCK_ACQUIRED" = 1 ] &&
-    { [ "$SPAWN_LAUNCH_SENT" = 0 ] || [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; } &&
-    [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
-    SPAWN_LIVE_SYNC_LOCK_ACQUIRED=0
-    fm_live_sync_release_task "$STATE" "$ID" || true
   fi
   if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
     SPAWN_META_LOCK_HELD=0
@@ -3352,14 +3338,6 @@ if [ "$KIND" = ship ]; then
       echo "notice: $ID ships branch=$BRANCH while $PROJ_NAME registers the ship-branch prefix '$STANDING_BRANCH' (branch $STANDING_BRANCH$ID) - the task's branch and PR will read as firstmate-authored; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
     fi
   fi
-fi
-
-if [ "$KIND" = ship ] && [ "$MODE" = live-sync ]; then
-  if ! FM_LIVE_SYNC_ACQUIRE_REUSE_SAME_ID=$RELAUNCH fm_live_sync_acquire_task "$STATE" "$ID" "$PROJ_NAME" "$PROJ_ABS" "$LIVE_SYNC_POLICY_ABS" "${LIVE_SCOPES[@]}"; then
-    echo "error: live-sync scope lock refused for $ID: $FM_LIVE_SYNC_ERROR" >&2
-    exit 1
-  fi
-  SPAWN_LIVE_SYNC_LOCK_ACQUIRED=1
 fi
 
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
@@ -5674,8 +5652,7 @@ if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   if [ "$RELAUNCH" -eq 0 ]; then
     if [ "$MODE" = live-sync ] && [ "$SPAWN_LAUNCH_SENT" = 1 ] && [ "$SPAWN_ENDPOINT_CLOSED" != 1 ]; then
       SPAWN_FRESH_COMMIT_PENDING=0
-      SPAWN_LIVE_SYNC_LOCK_PUBLISHED=$SPAWN_LIVE_SYNC_LOCK_ACQUIRED
-      echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its live-sync task record and scope lock were preserved so teardown can supervise cleanup of endpoint $T" >&2
+      echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its live-sync task record was preserved so teardown can supervise cleanup of endpoint $T" >&2
     elif spawn_fresh_commit_rollback; then
       echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its record was removed so no worker is left that the backlog does not own - close out endpoint $T and local copy $WT by hand, then re-run the spawn" >&2
     else
@@ -5705,7 +5682,6 @@ if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   echo "error: spawn of $ID was interrupted after launch delivery began; $SPAWN_PRESERVED_CLAIM" >&2
   exit "$SPAWN_DEFERRED_SIGNAL_STATUS"
 fi
-SPAWN_LIVE_SYNC_LOCK_PUBLISHED=$SPAWN_LIVE_SYNC_LOCK_ACQUIRED
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0
 

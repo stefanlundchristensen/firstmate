@@ -653,8 +653,9 @@ If the location is wrong or you are in a git project checkout instead, STOP - do
 
 $LIVE_SCOPE_BLOCK
 
-Firstmate mechanically validates those declared scopes against the registered live root and explicit protection policy, then keeps an overlapping-scope lock until cleanup.
-That is a cooperative safety boundary, not a same-user filesystem sandbox: your tools can still write elsewhere, so you must keep actual edits inside the declared scopes and away from protected core files.
+Firstmate mechanically validates those declared scopes against the registered live root and explicit protection policy.
+Live files are not reserved against other workers; firstmate must assign non-conflicting work.
+This is not a same-user filesystem sandbox: your tools can still write elsewhere, so keep actual edits inside the declared scopes and away from protected core files.
 
 # Rules
 $RULE1

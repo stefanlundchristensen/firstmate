@@ -434,12 +434,12 @@ EOF
 # Definition of done
 Delivery contract: mode=live-sync
 This task ships **live-sync**: direct edits to the registered live directory, with no branch, commit, push, pull request, pipeline, or merge.
-Firstmate mechanically validated the declared write scopes against the registered root and explicit protection policy, and it acquired a durable scope lock before launch.
-That lock serializes overlapping declared scopes and allows disjoint declared scopes to run at the same time.
+Firstmate mechanically validated the declared write scopes against the registered root and explicit protection policy.
+Live files are not reserved or serialized across workers; firstmate must assign non-conflicting work.
 It is not a same-user filesystem sandbox: your tool could still write elsewhere, so you must keep actual edits inside the declared write scopes and away from protected core files.
 Do not create commits or staging branches to represent the edits.
 When the requested live edits are complete, append \`done [at=<epoch>]: {summary of live edits}\` to the status file and stop.
-Firstmate will clean up the worker record and release the live-sync scope lock; there is no merge ask for this mode.
+Firstmate will clean up the worker record after the ordinary shutdown proof; there is no merge ask for this mode.
 EOF
       ;;
     no-mistakes:*)

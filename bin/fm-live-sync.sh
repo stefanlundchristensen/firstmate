@@ -8,17 +8,15 @@
 # non-zero so a caller can relay the refusal directly.
 # `info` prints the registered root and policy after canonicalization.
 # `check` validates path canonicalization, explicit policy classification, and
-# protected-path exclusion, but it does not acquire a durable lock.
+# protected-path exclusion. It does not reserve files or coordinate workers.
 #
-# This tool is not a sandbox. It mechanically validates declared write scopes;
-# dispatch owns durable overlap serialization, and a same-user worker must still
-# keep its actual writes inside the declared scopes.
+# This tool is not a sandbox. Multiple workers may target overlapping live files;
+# firstmate must assign non-conflicting work, and each worker must keep actual
+# writes inside its declared scopes.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
-STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-live-sync-lib.sh
 . "$SCRIPT_DIR/fm-live-sync-lib.sh"
