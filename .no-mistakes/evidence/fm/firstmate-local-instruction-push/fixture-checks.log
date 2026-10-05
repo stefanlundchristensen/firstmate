@@ -1,0 +1,3 @@
+ok - true-start AGENTS baselines stay immutable while every drifted Pi compact re-emits the current contract
+ok - read-only Pi compact refreshes against the rebuilding session identity without mutation
+ok - base-to-current fixture refresh delivers the complete updated AGENTS contract
