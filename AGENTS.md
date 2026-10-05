@@ -83,16 +83,19 @@ Load `session-start-recovery` when the digest reports unfinished checks, actiona
 
 ## 5. Recovery
 
+Load [fleet-supervision](.agents/skills/fleet-supervision/SKILL.md) after session start to reconcile recorded work before taking new work.
+
 ## 6. Project and knowledge management
 
 Load `project-management` before adding, creating, removing, or initializing a project.
 Load `secondmate-provisioning` before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a secondmate home, and before editing `data/secondmates.md`.
 
-Route durable knowledge to its most specific owner:
+Load [knowledge-routing](.agents/skills/knowledge-routing/SKILL.md) before storing durable preferences, learnings, task notes, investigation reports, or project memory; it owns routing knowledge to its most specific owner.
 
 ## 7. Task lifecycle
 
 The delivery lifecycle is an always-loaded operational contract; referenced scripts own exact commands, flags, and data mechanics.
+Load [task-lifecycle](.agents/skills/task-lifecycle/SKILL.md) before classifying, recording, dispatching, steering, validating, landing, or cleaning up ship or scout work, and before changing worker instructions.
 A scout produces a report at `data/<id>/report.md`, never a PR.
 `fm-send` is the only path for worker text; use `--resolve-key` when answering a keyed decision or blocker.
 
@@ -100,6 +103,7 @@ A scout produces a report at `data/<id>/report.md`, never a PR.
 ## 8. Supervision protocol
 
 Fleet supervision is an always-loaded operational contract; `docs/architecture.md`, `docs/turnend-guard.md`, the emitted session-start block, and script help own mechanisms and harness-specific recipes.
+Load [fleet-supervision](.agents/skills/fleet-supervision/SKILL.md) whenever fleet work or Relay requires supervision, and before handling a supervision notification.
 
 
 ## 9. Escalation and captain etiquette
@@ -157,10 +161,12 @@ Reach the captain immediately for:
 ## 10. Backlog contract
 
 The configured `tasks-axi` backend is the durable queue; the tracked default is `data/backlog.md`.
+Load [task-lifecycle](.agents/skills/task-lifecycle/SKILL.md) before filing, holding, updating, or re-evaluating backlog work items.
 
 ## 11. Crewmate briefs
 
 `bin/fm-brief.sh` and its help own scaffold syntax, generated variants, status protocol, delivery-mode definitions of done, and exact safety mechanics.
+Load [task-lifecycle](.agents/skills/task-lifecycle/SKILL.md) before writing or changing a crewmate brief.
 
 ## 12. Self-update
 
