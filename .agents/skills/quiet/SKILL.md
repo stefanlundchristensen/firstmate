@@ -51,7 +51,7 @@ For captain-held rechecks under quiet, see [architecture](../../../docs/architec
 ## How to exit quiet mode
 
 Unlike `/afk`, ordinary chat is never the exit signal - that is the entire
-point of this mode (AGENTS.md section 8's away-mode stub, quiet branch).
+point of this mode (`fleet-supervision`'s away-mode and quiet-mode stub, quiet branch).
 
 - Only an explicit `/quiet off` (or the captain plainly asking to leave quiet
   mode / resume normal supervision) exits it: run `bin/fm-afk-return.sh`
@@ -70,7 +70,7 @@ point of this mode (AGENTS.md section 8's away-mode stub, quiet branch).
 ## Orthogonal to approval authority
 
 Quiet mode changes how aggressively firstmate surfaces things, never who approves what.
-A PR ready for merge keeps the merge authority from `AGENTS.md` section 7, and a needs-decision finding keeps the `ask-user-authority` policy.
+A PR ready for merge keeps the merge authority from `task-lifecycle`, and a needs-decision finding keeps the `ask-user-authority` policy.
 
 The captain is present, so quiet mode holds nothing for a return.
 The record a quiet entry writes carries quiet mode (`bin/fm-afk-contract.sh mode`), and its entry, read-back, and session-start lines say so.

@@ -183,7 +183,7 @@ Treat an inherited queue that carries plans with no matching delivery record as 
 
 ## Backlog handoff
 
-Apply `AGENTS.md` section 10's work-items-only backlog contract before creation or handoff.
+Apply `task-lifecycle`'s work-items-only backlog contract before creation or handoff.
 When a secondmate is created for a domain, existing main-backlog items that fall under its scope should become its work instead of staying stranded in the main backlog.
 Scope-matching is firstmate's judgment against the secondmate's natural-language scope, not a keyword rule.
 Read `data/backlog.md`, pick queued items that fit the new scope, and move them with:
@@ -265,3 +265,12 @@ It kills child windows, discards child work and state inside the secondmate home
 If forced teardown contends with a fresh task publication in any affected home, one command refuses without publishing or removing task state; treat that refusal as terminal and inspect the other operation before retrying.
 Relaunch and non-forced teardown remain outside that serialization.
 Never use `--force` unless the captain explicitly said to discard the work.
+
+## Extracted always-loaded contract
+
+Its scope field drives routing and its project list is non-exclusive provisioning data, not ownership.
+Keep `local-only` work in the main home.
+
+A secondmate is idle by default and acts only on work routed by the main firstmate.
+It reconciles its own work under way after restart, then waits silently; an empty queue never authorizes a survey, audit, or self-directed improvement sweep.
+Do not reconstruct or supervise a secondmate's child tree from the main home.
