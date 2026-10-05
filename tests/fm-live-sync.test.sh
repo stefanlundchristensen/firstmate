@@ -71,34 +71,45 @@ test_policy_validation_and_canonicalization() {
   pass "fm-live-sync-lib: canonicalization, symlink aliases, traversal, protection, classification, and self-overlap checks"
 }
 
-test_scope_locks_exclude_only_overlaps() {
-  local root policy state out
-  root=$(make_vault locks)
-  policy="$root/.firstmate-live-sync-policy"
-  state="$TMP_ROOT/locks/state"
-  mkdir -p "$state"
-  root=$(fm_live_sync_canonical_root "$root") || fail "root did not canonicalize"
-  policy=$(fm_live_sync_canonical_policy "$root" "$policy") || fail "policy did not canonicalize"
-
-  fm_live_sync_acquire_task "$state" t1 vault "$root" "$policy" Notes/a.md || fail "initial lock should pass"
-  if out=$(fm_live_sync_acquire_task "$state" t1 vault "$root" "$policy" Notes/b.md 2>&1); then
-    fail "duplicate same-task fresh lock unexpectedly passed"
-  fi
-  assert_contains "$out" "already has an active scope lock" "duplicate same-task lock refusal did not name the active lock"
-  FM_LIVE_SYNC_ACQUIRE_REUSE_SAME_ID=1 fm_live_sync_acquire_task "$state" t1 vault "$root" "$policy" Notes/a.md || fail "same-task relaunch lock reuse should pass"
-  if out=$(fm_live_sync_acquire_task "$state" t2 vault "$root" "$policy" Notes/a.md 2>&1); then
-    fail "overlapping lock unexpectedly passed"
-  fi
-  assert_contains "$out" "overlaps active task t1" "overlapping lock refusal did not name the owning task"
-
-  fm_live_sync_acquire_task "$state" t3 vault "$root" "$policy" Notes/b.md || fail "disjoint file scope should lock concurrently"
-  assert_present "$state/live-sync-locks/t1.lock" "first lock record missing"
-  assert_present "$state/live-sync-locks/t3.lock" "disjoint lock record missing"
-
-  fm_live_sync_release_task "$state" t1 || fail "lock release failed"
-  fm_live_sync_acquire_task "$state" t2 vault "$root" "$policy" Notes/a.md || fail "released scope should be reusable"
-
-  pass "fm-live-sync-lib: overlapping locks exclude each other while disjoint scopes run concurrently"
+test_overlapping_live_spawns_ignore_historical_reservations() {
+  local root home fakebin id out rc
+  root=$(make_vault overlap)
+  home="$TMP_ROOT/overlap/home"
+  fakebin="$TMP_ROOT/overlap/bin"
+  mkdir -p "$home/data" "$home/state/live-sync-locks" "$home/config" "$fakebin"
+  printf 'manual\n' > "$home/config/backlog-backend"
+  printf '%s\n' "- vault [live-sync path=$root policy=.firstmate-live-sync-policy] - synthetic vault" > "$home/data/projects.md"
+  printf 'project=vault\nroot=%s\npolicy=%s/.firstmate-live-sync-policy\nscope=file\t%s/Notes/a.md\tNotes/a.md\n' \
+    "$root" "$root" "$root" > "$home/state/live-sync-locks/finished.lock"
+  cp "$home/state/live-sync-locks/finished.lock" "$TMP_ROOT/overlap/historical-before"
+  write_fake_tmux "$fakebin/tmux"
+  for id in live-overlap-a live-overlap-b; do
+    FM_HOME="$home" "$BRIEF" "$id" vault --mode live-sync --live-scope Notes/a.md >/dev/null \
+      || fail "cannot scaffold overlapping fixture $id"
+    fill_brief_subsections "$home/data/$id/brief.md"
+    out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux PATH="$fakebin:$PATH" \
+      "$SPAWN" "$id" vault 'bash -lc true' --mode live-sync --yolo off --live-scope Notes/a.md 2>&1)
+    rc=$?
+    expect_code 0 "$rc" "overlapping live spawn failed: $out"
+    assert_present "$home/state/$id.meta" "overlapping spawn did not publish its worker record"
+    assert_grep $'live_sync_scope=file\tNotes/a.md' "$home/state/$id.meta" "spawn lost the policy-validated write scope"
+    assert_absent "$home/state/live-sync-locks/$id.lock" "spawn created a new file reservation"
+  done
+  cmp -s "$TMP_ROOT/overlap/historical-before" "$home/state/live-sync-locks/finished.lock" \
+    || fail "spawn changed historical reservation evidence"
+  assert_absent "$home/state/.live-sync-locks.lock" "spawn created a file-reservation index lock"
+  FM_HOME="$home" "$BRIEF" live-denied vault --mode live-sync --live-scope Notes/a.md >/dev/null \
+    || fail "cannot scaffold protected-path fixture"
+  fill_brief_subsections "$home/data/live-denied/brief.md"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux PATH="$fakebin:$PATH" \
+    "$SPAWN" live-denied vault 'bash -lc true' --mode live-sync --yolo off --live-scope Config/core.md 2>&1)
+  rc=$?
+  expect_code 1 "$rc" 'reservation removal must not bypass forbidden-path policy'
+  assert_contains "$out" 'overlaps protected path Config/core.md' 'protected-path spawn did not report the policy refusal'
+  assert_absent "$home/state/live-denied.meta" 'protected-path spawn published a worker'
+  pass 'fm-spawn: overlapping live scopes launch without reservations; historical evidence stays inert and protected paths still refuse'
 }
 
 test_project_mode_live_sync_registry() {
@@ -118,6 +129,14 @@ EOF
   assert_equals "$root" "$out" "live root query returned the wrong root token"
   out=$(FM_HOME="$home" "$PROJECT_MODE" --live-policy vault) || fail "live policy query failed"
   assert_equals ".firstmate-live-sync-policy" "$out" "live policy query returned the wrong policy token"
+  out=$(FM_HOME="$home" "$LIVE_SYNC" info vault) || fail 'live-sync info failed without reservation wiring'
+  assert_contains "$out" "root: $(canonical_path "$root")" 'live-sync info returned the wrong canonical root'
+  out=$(FM_HOME="$home" "$LIVE_SYNC" check vault --scope Notes/a.md) || fail 'live-sync policy check rejected an allowed scope'
+  assert_contains "$out" 'ok: live-sync scopes are allowed for vault' 'live-sync check lost its policy-validation result'
+  out=$(FM_HOME="$home" "$LIVE_SYNC" check vault --scope Config/core.md 2>&1)
+  rc=$?
+  expect_code 1 "$rc" 'live-sync CLI must retain forbidden-path policy'
+  assert_contains "$out" 'overlaps protected path Config/core.md' 'live-sync CLI did not report the protected-path refusal'
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" yolo-vault 2>&1)
   rc=$?
@@ -133,18 +152,18 @@ EOF
   rc=$?
   expect_code 2 "$rc" "manual live-sync acquire refusal"
   assert_contains "$out" "unknown command acquire" "manual acquire refusal did not name the removed command"
-  assert_absent "$home/state/live-sync-locks/live-manual.lock" "manual acquire created an unsupervised live-sync lock"
+  assert_absent "$home/state/live-sync-locks/live-manual.lock" "unsupported acquire created a file reservation"
 
   mkdir -p "$home/state"
-  fm_live_sync_acquire_task "$home/state" live-manual vault "$root" "$root/.firstmate-live-sync-policy" Notes/a.md \
-    || fail "setup lock for manual release refusal failed"
+  mkdir -p "$home/state/live-sync-locks"
+  printf 'historical reservation evidence\n' > "$home/state/live-sync-locks/live-manual.lock"
   out=$(FM_HOME="$home" "$LIVE_SYNC" release live-manual 2>&1)
   rc=$?
   expect_code 2 "$rc" "manual live-sync release refusal"
   assert_contains "$out" "unknown command release" "manual release refusal did not name the removed command"
-  assert_present "$home/state/live-sync-locks/live-manual.lock" "manual release removed a supervised live-sync lock"
+  assert_present "$home/state/live-sync-locks/live-manual.lock" "unsupported release deleted historical reservation evidence"
 
-  pass "fm-project-mode/fm-live-sync: registry queries, invalid token refusals, and no manual lock mutation"
+  pass "fm-project-mode/fm-live-sync: registry queries, invalid token refusals, and no historical reservation mutation"
 }
 
 fill_brief_subsections() {  # <file>
@@ -204,7 +223,7 @@ EOF
   [ "$rc" -ne 0 ] || fail "spawn should have reached the fake tmux backend and failed"
   assert_contains "$out" "tmux" "spawn did not reach the backend after validating the live-sync contract"
   lockfile="$home/state/live-sync-locks/live-a.lock"
-  assert_absent "$lockfile" "failed fresh live-sync spawn left its scope lock behind"
+  assert_absent "$lockfile" "failed fresh live-sync spawn created a file reservation"
 
   out=$(FM_HOME="$home" "$BRIEF" live-b vault --mode live-sync --live-scope Notes/b.md --branch-prefix fm/ 2>&1)
   rc=$?
@@ -218,10 +237,10 @@ EOF
   expect_code 1 "$rc" "live-sync spawn yolo refusal"
   assert_contains "$out" "has no merge step" "live-sync yolo refusal did not name the no-merge contract"
 
-  pass "fm-brief/fm-spawn: live-sync records scopes, refuses branch/yolo drift, and rolls back failed fresh locks"
+  pass "fm-brief/fm-spawn: live-sync records scopes, refuses branch/yolo drift, and creates no reservations on failure"
 }
 
-test_live_sync_backlog_failure_preserves_record_and_lock() {
+test_live_sync_backlog_failure_preserves_record() {
   local root home fakebin real_tasks out rc brief
   command -v tasks-axi >/dev/null 2>&1 || {
     pass "skipped: tasks-axi is not installed, so the live-sync backlog failure regression cannot run"
@@ -260,15 +279,15 @@ SH
       "$SPAWN" live-c vault "bash -lc true" --mode live-sync --yolo off --live-scope Notes/a.md 2>&1)
   rc=$?
   [ "$rc" -ne 0 ] || fail "spawn should fail when the final backlog start fails"
-  assert_contains "$out" "task record and scope lock were preserved" "live-sync backlog failure did not report supervised preservation"
+  assert_contains "$out" "task record was preserved" "live-sync backlog failure did not report supervised preservation"
   assert_present "$home/state/live-c.meta" "live-sync backlog failure removed the task record"
-  assert_present "$home/state/live-sync-locks/live-c.lock" "live-sync backlog failure released the scope lock"
+  assert_absent "$home/state/live-sync-locks/live-c.lock" "live-sync backlog failure created a file reservation"
 
   pass "fm-spawn: live-sync post-launch backlog failures keep teardown-owned state"
 }
 
 test_policy_validation_and_canonicalization
-test_scope_locks_exclude_only_overlaps
+test_overlapping_live_spawns_ignore_historical_reservations
 test_project_mode_live_sync_registry
 test_brief_and_spawn_live_sync_scope_contract
-test_live_sync_backlog_failure_preserves_record_and_lock
+test_live_sync_backlog_failure_preserves_record

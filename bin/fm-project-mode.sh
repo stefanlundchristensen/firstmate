@@ -48,7 +48,7 @@
 #   local-only             local branch, no remote/PR, guarded local merge
 #   live-sync              external live directory, no branch/commit/PR; worker
 #                          edits only declared write scopes after live-sync
-#                          path/policy validation and scope-lock acquisition
+#                          path/policy validation
 #   no-mistakes-prod-only  a conditional policy, not a task mode: firstmate
 #                          classifies each task's surface at intake (the
 #                          project-management skill owns that classification).
